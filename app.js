@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.3.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -94,7 +94,8 @@ async function init() {
   S.view = SD ? 'home' : 'setup';
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });
-  window.addEventListener('online', () => sendQueue(true));
+  window.addEventListener('online', () => { sendQueue(true); ocrVorladen() });
+  if (SD) setTimeout(ocrVorladen, 3000);
   if (QUEUE.length && navigator.onLine) sendQueue(true);
 }
 let installEvt = null;
@@ -107,6 +108,11 @@ const STEPS = [['Kopf', '📋'], ['Pakete', '🛣️'], ['Personal', '👷'], ['
 function render() {
   const hb = $('#hbtn'); hb.style.display = 'none';
   $('#steps').style.display = 'none'; $('#foot').style.display = 'none'; $('#hsub').textContent = '';
+  if (S.view === 'telefon') {
+    $('#htitle').textContent = '📞 Tagesbericht per Gespräch'; $('#hsub').textContent = S.r ? (wtag(S.r.datum) + ', ' + dateDe(S.r.datum) + (S.r.baunr ? ' · ' + S.r.baunr : '')) : '';
+    hb.style.display = ''; hb.textContent = 'Formular'; hb.onclick = () => telEnde(true);
+    return telRender();
+  }
   if (S.view === 'erfassung') {
     const r = S.r, res = pruefe(r);
     $('#htitle').textContent = 'Tagesbericht'; $('#hsub').textContent = (r.datum ? wtag(r.datum) + ', ' + dateDe(r.datum) : '') + (r.baunr ? ' · ' + r.baunr : '');
@@ -131,18 +137,20 @@ function vHome() {
   ${QUEUE.length ? `<div class="demo" style="background:#fdecea;border-color:#f5c2c0;color:#8a1c1c"><b>${QUEUE.length} Bericht(e) warten auf Versand</b> (kein Netz). <button class="btn small" data-act="sendqueue">Jetzt senden</button></div>` : ''}
   <div class="home-hero">
     <h2 style="margin-top:0">Hallo${SET.polier ? ' ' + esc(SET.polier.split(',').reverse().join(' ').trim()) : ''}</h2>
-    ${draft ? `<button class="btn orange full big" data-act="weiter">Entwurf fortsetzen<br><small style="font-weight:400">${wtag(draft.datum)}, ${dateDe(draft.datum)} ${esc(draft.baunr)} ${esc(draft.baustelle)}</small></button>
+    ${draft ? `<button class="btn orange full big" style="flex-direction:column" data-act="weiter">Entwurf fortsetzen<br><small style="font-weight:400">${wtag(draft.datum)}, ${dateDe(draft.datum)} ${esc(draft.baunr)} ${esc(draft.baustelle)}</small></button>
       <div class="row" style="margin-top:8px"><button class="btn ghost" data-act="neu">Neuer Bericht</button><button class="btn danger" data-act="verwerfen">Entwurf löschen</button></div>`
       : `<button class="btn orange full big" data-act="neu">＋ Neuer Tagesbericht</button>`}
+    <button class="btn full big" style="margin-top:8px;background:#2b2b2b;flex-direction:column" data-act="telefon">📞 Bericht per Gespräch<br><small style="font-weight:400">Die App fragt, du antwortest mit Sprache</small></button>
     ${HIST.length ? `<button class="btn ghost full" style="margin-top:8px" data-act="vorlage">↺ Wie letzter Bericht (${esc(HIST[0].baunr)} ${dateDe(HIST[0].datum)})</button>` : ''}
+    ${HIST.length > 1 ? `<button class="btn ghost full" style="margin-top:8px;border-style:dashed" data-act="vorlagewahl">📚 Älteren Bericht als Vorlage wählen …</button>` : ''}
   </div>
   <div class="card"><div class="prow"><b>Gesendete Berichte</b><button class="btn small ghost" data-view="verlauf">Alle</button></div>
    <div class="lst">${HIST.slice(0, 5).map(histItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
   <div class="card"><div class="prow"><div><b>Einstellungen</b><div class="small">Empfänger: ${esc(SET.email) || '<span style="color:var(--rot)">nicht festgelegt</span>'}<br>Stammdaten: ${SD ? SD.ma.length + ' Mitarbeiter, ' + SD.ge.length + ' Geräte · Stand ' + dateDe(SD.stand) : '–'}</div></div><button class="btn small ghost" data-view="settings">Ändern</button></div></div>
   <p class="small" style="text-align:center">Version ${APP_VERSION}</p>`;
 }
-function histItem(h) { return `<div class="it"><div><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)}<br><span class="small">${esc(h.baustelle)} · ${h.weg === 'upload' ? 'direkt übertragen' : 'per E-Mail geteilt'} ${h.gesendet ? new Date(h.gesendet).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span></div><button class="btn small ghost" data-resend="${h.id}">Erneut</button></div>` }
-function vVerlauf() { return `<div class="card"><div class="lst">${HIST.map(histItem).join('') || '<div class="hint">Noch keine Berichte gesendet.</div>'}</div></div><p class="small">„Erneut“ erzeugt die PDFs neu und öffnet den Versand noch einmal. Gespeichert werden die letzten 30 Berichte auf diesem Handy.</p>` }
+function histItem(h) { return `<div class="it"><div><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)}<br><span class="small">${esc(h.baustelle)} · ${h.weg === 'upload' ? 'direkt übertragen' : 'per E-Mail geteilt'} ${h.gesendet ? new Date(h.gesendet).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span></div><div style="display:flex;gap:6px;flex:none"><button class="btn small ghost" data-vorlage="${h.id}">Vorlage</button><button class="btn small ghost" data-resend="${h.id}">Erneut</button></div></div>` }
+function vVerlauf() { return `<div class="card"><div class="lst">${HIST.map(histItem).join('') || '<div class="hint">Noch keine Berichte gesendet.</div>'}</div></div><p class="small">„Vorlage“ startet einen neuen Bericht mit Baustelle, Paketen, Kolonne und Geräten dieses Berichts. „Erneut“ erzeugt die PDFs neu und öffnet den Versand noch einmal. Gespeichert werden die letzten 30 Berichte auf diesem Handy.</p>` }
 function vSetup() {
   return `<div class="home-hero"><h2 style="margin-top:0">Willkommen 👷</h2>
   <p>Einmalig einrichten – danach funktioniert die App auch ohne Netz.</p>
@@ -198,10 +206,11 @@ const apLbl = (a, i) => `<span class="ap-tag">AP ${esc(a.nr) || '?'}</span><span
 const stepper = (kind, id, ap, val) => `<div class="step"><button data-st="${kind}|${id}|${ap}|-0.25">−</button><input inputmode="decimal" data-hin="${kind}|${id}|${ap}" value="${val ? fmt(val) : ''}" placeholder="0"><button data-st="${kind}|${id}|${ap}|0.25">＋</button></div>`;
 function vPers() {
   const r = S.r, d = dauer(r); return `<h2>Personal</h2>
-<div class="grid2" style="margin-bottom:10px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne vom letzten Bericht</button></div>
+<div class="grid2" style="margin-bottom:6px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne vom letzten Bericht</button></div>
+${HIST.length > 1 ? `<button class="btn ghost small full" style="margin-bottom:10px;border-style:dashed" data-act="kolonnewahl">Kolonne aus älterem Bericht …</button>` : ''}
 ${r.personal.length ? `<div class="card" style="background:#f6f6f6"><div class="prow"><div class="hint" style="margin:0">Arbeitszeit lt. Abschluss: <b>${fq(d)} h</b></div><button class="btn small ghost" data-act="copyh">Stunden der 1. Person für alle</button></div></div>` : `<div class="empty">Noch niemand eingetragen.</div>`}
 ${r.personal.map(p => { const s = sumH(p); const warn = !p.zus && Math.abs(s - d) > 0.01; return `<div class="card">
- <div class="prow"><div><div class="pname">${esc(p.name)}</div><div class="pnr">Pers.-Nr. ${esc(p.nr) || '–'}</div></div><div style="display:flex;align-items:center"><span class="sum ${warn ? 'warn' : ''}">${p.zus ? esc(p.zus) : fq(s) + ' h'}</span><button class="x" data-del="personal|${p.id}">✕</button></div></div>
+ <div class="prow"><div><div class="pname">${esc(p.name)}</div>${p.nr || !p.neu ? `<div class="pnr">Pers.-Nr. ${esc(p.nr) || '–'}${p.neu ? '<span class="newp">neu</span>' : ''}</div>` : `<div class="pnr">Neu, nicht in der Liste <span class="newp">neu</span></div><input data-pnr="${p.id}" inputmode="numeric" placeholder="Pers.-Nr. (falls bekannt)" style="margin-top:6px;padding:7px 9px;font-size:15px">`}</div><div style="display:flex;align-items:center"><span class="sum ${warn ? 'warn' : ''}">${p.zus ? esc(p.zus) : fq(s) + ' h'}</span><button class="x" data-del="personal|${p.id}">✕</button></div></div>
  <div class="chips" style="margin:8px 0">${SD.zus.map(z => `<button class="chip zus ${p.zus === z ? 'on' : ''}" data-zus="${p.id}|${z}">${z}</button>`).join('')}</div>
  ${p.zus ? `<div class="hint">${zusText(p.zus)}: keine Stunden auf Arbeitspakete.</div>` : r.aps.map((a, i) => `<div class="hrow"><div class="lbl">${apLbl(a, i)}</div>${stepper('personal', p.id, a.id, p.h[a.id])}</div>`).join('')}
 </div>` }).join('')}`;
@@ -216,17 +225,19 @@ ${r.aps.map((a, i) => `<div class="hrow"><div class="lbl">${apLbl(a, i)}</div>${
 }
 function vMat() {
   const r = S.r; return `<h2>Material & Lieferscheine</h2>
-<p class="hint">Pro Lieferschein ein Eintrag. Foto mit der Kamera – es wird als Anlage zum Tagesbericht abgelegt.</p>
+<div class="card" style="background:#fff4ea;border:1.5px solid #f6c89a"><b>📷 Lieferschein scannen</b><p class="hint" style="margin:4px 0 8px">Foto machen – Lieferschein-Nr., Menge, Material und Lieferant werden automatisch eingetragen. Lieferschein flach hinlegen, gut ausleuchten, ganz aufs Bild.</p>
+<div class="row"><span class="btn orange fotobtn">📷 Kamera<input type="file" accept="image/*" capture="environment" data-scan="1"></span><span class="btn ghost fotobtn">🖼️ Mehrere aus Galerie<input type="file" accept="image/*" multiple data-scan="1"></span></div></div>
 ${r.material.length ? '' : `<div class="empty">Noch kein Material.</div>`}
 ${r.material.map(m => `<div class="card"><div class="prow"><b>${esc(m.mat) || 'Material wählen'}</b><button class="x" data-del="material|${m.id}">✕</button></div>
  <label>Für Arbeitspaket</label><select data-m="${m.id}" data-k="ap">${r.aps.map((a, i) => `<option value="${a.id}" ${m.ap === a.id ? 'selected' : ''}>AP ${esc(a.nr) || '?'} ${esc((a.text || '').slice(0, 30))}</option>`).join('')}</select>
- <div class="grid2"><div><label>Lieferant</label>${pickBtn('lief|' + m.id, m.lief || 'wählen …')}</div><div><label>Material</label>${pickBtn('mat|' + m.id, m.mat || 'wählen …')}</div></div>
- <div class="grid2"><div><label>Lieferschein-Nr.</label><input data-m="${m.id}" data-k="ls" value="${esc(m.ls)}" placeholder="43663"></div>
- <div><label>Menge ${m.einh ? '[' + esc(m.einh) + ']' : ''}</label><input inputmode="decimal" data-m="${m.id}" data-k="menge" value="${m.menge !== '' && m.menge != null ? fmt(num(m.menge)) : ''}" placeholder="0,00"></div></div>
- <div style="margin-top:10px"><span class="btn ghost small fotobtn">📷 Lieferschein fotografieren<input type="file" accept="image/*" capture="environment" data-foto="${m.id}"></span></div>
+ <div class="grid2"><div class="${ocrF(m, 'lief')}"><label>Lieferant</label>${pickBtn('lief|' + m.id, m.lief || 'wählen …')}</div><div class="${ocrF(m, 'mat')}"><label>Material</label>${pickBtn('mat|' + m.id, m.mat || 'wählen …')}</div></div>
+ <div class="grid2"><div><label>Lieferschein-Nr.</label><input class="${ocrF(m, 'ls')}" data-m="${m.id}" data-k="ls" value="${esc(m.ls)}" placeholder="43663"></div>
+ <div><label>Menge ${m.einh ? '[' + esc(m.einh) + ']' : ''}</label><input class="${ocrF(m, 'menge')}" inputmode="decimal" data-m="${m.id}" data-k="menge" value="${m.menge !== '' && m.menge != null ? fmt(num(m.menge)) : ''}" placeholder="0,00"></div></div>
+ ${m.ocr ? ocrHinweis(m) : ''}
+ <div style="margin-top:10px"><span class="btn ghost small fotobtn">📷 ${m.fotos.length ? 'Weiteres Foto' : 'Foto + automatisch erkennen'}<input type="file" accept="image/*" capture="environment" data-foto="${m.id}"></span></div>
  <div class="thumbs">${m.fotos.map((f, i) => `<img src="${f}" data-delfoto="${m.id}|${i}" title="Antippen zum Löschen">`).join('')}</div>
 </div>`).join('')}
-<div class="row"><button class="btn" data-act="addmat">＋ Lieferschein</button>${r.material.length ? `<button class="btn ghost" data-act="dupmat">＋ Gleiches Material</button>` : ''}</div>`;
+<div class="row"><button class="btn" data-act="addmat">＋ Von Hand</button>${r.material.length ? `<button class="btn ghost" data-act="dupmat">＋ Gleiches Material</button>` : ''}</div>`;
 }
 function vAbschluss() {
   const r = S.r, res = pruefe(r); const e = res.filter(x => x.t === 'e').length, w = res.filter(x => x.t === 'w').length; return `<h2>Abschluss</h2>
@@ -244,6 +255,417 @@ function vAbschluss() {
 function docViewer(r) { return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
 const pickBtn = (k, label) => `<button class="btn ghost full" style="justify-content:space-between;font-weight:600" data-pick="${k}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span>▾</span></button>`;
 
+const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace('~', '') === k) ? 'ocr' : '';
+function ocrHinweis(m) {
+  const o = m.ocr, n = { ls: 'Lieferschein-Nr.', menge: 'Menge', mat: 'Material', lief: 'Lieferant' };
+  const erk = o.auto.filter(f => !f.endsWith('~')).map(f => n[f]), uebern = o.auto.filter(f => f.endsWith('~')).map(f => n[f.replace('~', '')]);
+  const dw = o.datum && o.datum !== S.r.datum ? `<br>⚠️ Datum auf dem Lieferschein: <b>${dateDe(o.datum)}</b> – passt nicht zum Bericht.` : '';
+  return `<div class="ocrbox">${o.fehler ? 'Texterkennung fehlgeschlagen – bitte von Hand ausfüllen.' : erk.length ? `🔍 Automatisch erkannt: <b>${erk.join(', ')}</b> – bitte prüfen.` : 'Nichts sicher erkannt – bitte von Hand ausfüllen.'}${uebern.length ? `<br>↺ Vom vorherigen Lieferschein übernommen: ${uebern.join(', ')}` : ''}${dw}
+  ${o.text ? `<details><summary>Erkannten Text anzeigen</summary><pre>${esc(o.text)}</pre></details>` : ''}</div>`;
+}
+async function vorlageMitPruefung(h) { if (S.r && (S.r.personal.length || S.r.baustelle) && !(await bestaetigen('Der aktuelle Entwurf wird durch die Vorlage ersetzt. Fortfahren?'))) return; vorlageAus(h) }
+
+// ---------------------------------------------------------------- Lieferschein-Texterkennung (OCR, läuft auf dem Handy, offline)
+let ocrWorker = null;
+async function ocrInit(progress) {
+  if (ocrWorker) return ocrWorker;
+  const base = new URL('vendor/tesseract/', location.href).href;
+  ocrWorker = await Tesseract.createWorker('deu', 1, {
+    workerPath: base + 'worker.min.js', corePath: base, langPath: base.replace(/\/$/, ''), gzip: true, workerBlobURL: false,
+    logger: m => { if (progress && m.status === 'recognizing text') progress(m.progress) }
+  });
+  return ocrWorker;
+}
+// Bild für die Erkennung aufbereiten: Graustufen, Kontrast, sinnvolle Größe
+async function ocrBild(file) {
+  const bmp = await createImageBitmap(file); const s = Math.min(2, 3000 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+  const x = c.getContext('2d'); x.filter = 'grayscale(1) contrast(1.6)'; x.drawImage(bmp, 0, 0, c.width, c.height); return c;
+}
+const LIEF_ALIAS = { MKB: ['moränekieswerk', 'moranekieswerk', 'moraenekieswerk', 'kieswerk baustetten', 'mkb'], BSR: ['baustoffrecycling', 'baustoff-recycling', 'bsr'] };
+function zahlDe(s) { s = String(s).replace(/\s/g, ''); if (s.includes(',')) return parseFloat(s.replace(/\./g, '').replace(',', '.')); if (/^\d{1,3}(\.\d{3})+$/.test(s)) return parseFloat(s.replace(/\./g, '')); return parseFloat(s) }
+function parseLieferschein(text) {
+  const t = text.replace(/[|]/g, ' ').replace(/[ \t]+/g, ' '), low = t.toLowerCase(), flat = low.replace(/\s+/g, '');
+  const out = { felder: [] };
+  // Lieferant
+  for (const [k, al] of Object.entries(LIEF_ALIAS)) if (al.some(a => low.includes(a))) { out.lief = k; break }
+  if (!out.lief) { const hit = SD.lief.filter(l => l.length >= 3).sort((a, b) => b.length - a.length).find(l => new RegExp('\\b' + l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(low)); if (hit) out.lief = hit }
+  // Material: Materialnummer (stark) oder Name
+  let best = null;
+  for (const m of SD.mat) {
+    if (m[1] && m[1].length >= 4 && new RegExp('\\b' + m[1] + '\\b').test(t)) { best = { m, s: 100 }; break }
+    const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length >= 4 && flat.includes(n) && (!best || n.length > best.s)) best = { m, s: n.length };
+  }
+  if (!best) {   // unscharf suchen (OCR-Lesefehler wie „Erostschutzkies“)
+    const lev = (a, b, max) => { let prev = Array.from({ length: b.length + 1 }, (_, i) => i); for (let i = 1; i <= a.length; i++) { const cur = [i]; let mn = i; for (let j = 1; j <= b.length; j++) { cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); if (cur[j] < mn) mn = cur[j] } if (mn > max) return max + 1; prev = cur } return prev[b.length] };
+    for (const m of SD.mat) {
+      const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length < 6) continue; const max = Math.max(1, Math.floor(n.length * 0.15));
+      for (let i = 0; i + n.length <= flat.length + 1; i++) { if (flat[i] !== n[0] && flat[i + 1] !== n[1]) continue; const d = lev(flat.substr(i, n.length), n, max); if (d <= max && (!best || n.length - d > best.s)) { best = { m, s: n.length - d }; break } }
+    }
+  }
+  if (best) { out.mat = best.m[0]; out.matnr = best.m[1]; out.einh = best.m[2]; if (!out.lief && ['MKB', 'BSR'].includes(best.m[3])) out.lief = best.m[3] }
+  // Lieferschein-Nr.
+  const lsRe = [/(?:liefer\s*-?\s*schein|wiege\s*-?\s*schein|beleg)\s*-?\s*(?:nr|nummer|no)?\.?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})/i, /\b(\d{2}-\d{2}-\d{4,6})\b/, /\bLS\s*-?\s*(?:Nr\.?)?\s*[:#]?\s*(\d{4,})/i, /\bNr\.?\s*[:#]?\s*(\d{5,})/i];
+  for (const re of lsRe) { const m = t.match(re); if (m && /\d/.test(m[1])) { out.ls = m[1].replace(/[.,;:]$/, ''); break } }
+  // Menge: Netto bevorzugt, sonst Brutto - Tara, sonst "Menge"
+  const N = '(\\d{1,3}(?:[.\\s]\\d{3})+(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
+  const grab = w => { const m = t.match(new RegExp(w + '[^\\d\\n]{0,25}' + N + '\\s*(kg|t|to|tonnen|m3|m³|stk)?', 'i')); return m ? { v: zahlDe(m[1]), u: (m[2] || '').toLowerCase() } : null };
+  let q = grab('netto(?:\\s*-?\\s*gewicht)?') || grab('menge') || grab('ladegewicht');
+  if (!q) { const b = grab('brutto'), ta = grab('tara'); if (b && ta && b.v > ta.v) q = { v: b.v - ta.v, u: b.u || ta.u } }
+  if (q && isFinite(q.v) && q.v > 0) {
+    let v = q.v; const einh = out.einh || 'to';
+    if (q.u === 'kg' || (!q.u && v > 200 && einh === 'to')) v = v / 1000;
+    out.menge = Math.round(v * 100) / 100;
+  }
+  const dm = t.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
+  ['ls', 'menge', 'mat', 'lief'].forEach(k => { if (out[k] != null && out[k] !== '') out.felder.push(k) });
+  return out;
+}
+// Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag
+async function scanLieferscheine(files, zielId) {
+  const r = S.r; let erkannt = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    overlay(`<div class="spin"></div><b>Lieferschein ${files.length > 1 ? (i + 1) + ' von ' + files.length + ' ' : ''}wird gelesen …</b><p class="small" id="ocrp">Texterkennung wird gestartet${ocrWorker ? '' : ' (beim ersten Mal ca. 10 Sek.)'}</p>`);
+    let m = zielId ? r.material.find(x => x.id === zielId) : null;
+    if (!m) { const l = r.material[r.material.length - 1]; m = { id: uid(), ap: l ? l.ap : r.aps[0].id, lief: '', mat: '', matnr: '', einh: '', ls: '', menge: '', fotos: [] }; r.material.push(m) }
+    try {
+      m.fotos.push(await fotoKomprimieren(f));
+      const w = await ocrInit(p => { const e = $('#ocrp'); if (e) e.textContent = 'Texterkennung ' + Math.round(p * 100) + ' %' });
+      const bild = await ocrBild(f);
+      await w.setParameters({ tessedit_pageseg_mode: '3' });
+      const { data } = await w.recognize(bild);
+      let res = parseLieferschein(data.text || '');
+      if (!res.ls || !res.mat || !res.menge) {   // zweiter Durchgang: verstreuter Text (Tabellen, Kästen)
+        const e = $('#ocrp'); if (e) e.textContent = 'Zweiter Durchgang …';
+        await w.setParameters({ tessedit_pageseg_mode: '4' });
+        const d2 = (await w.recognize(bild)).data; data.text = (data.text || '') + '\n' + (d2.text || '');
+        const r2 = parseLieferschein(data.text); for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'lief', 'datum']) if (res[k] == null || res[k] === '') res[k] = r2[k]; res.felder = r2.felder;
+      }
+      const auto = [];
+      if (res.ls && !m.ls) { m.ls = res.ls; auto.push('ls') }
+      if (res.menge && !num(m.menge)) { m.menge = res.menge; auto.push('menge') }
+      if (res.mat && !m.mat) { m.mat = res.mat; m.matnr = res.matnr || ''; m.einh = res.einh || ''; auto.push('mat') }
+      if (res.lief && !m.lief) { m.lief = res.lief; auto.push('lief') }
+      // nicht erkannt: Lieferant/Material vom vorherigen Lieferschein übernehmen (meist gleiche Fuhre)
+      const prev = r.material.filter(x => x.id !== m.id && x.mat).pop();
+      if (prev && !m.mat) { m.mat = prev.mat; m.matnr = prev.matnr; m.einh = prev.einh; auto.push('mat~') }
+      if (prev && !m.lief) { m.lief = prev.lief; auto.push('lief~') }
+      m.ocr = { auto, text: (data.text || '').slice(0, 1500), datum: res.datum || '' };
+      if (res.felder.length) erkannt++;
+    } catch (e) { console.error(e); m.ocr = { auto: [], text: '', fehler: String(e.message || e) } }
+    zielId = null; saveDraft();
+  }
+  closeOverlay(); render();
+  toast(erkannt ? `${erkannt} von ${files.length} Lieferschein(en) erkannt – bitte gelb markierte Felder prüfen` : 'Text nicht sicher erkannt – bitte Felder ausfüllen', 4000);
+}
+async function fotoKomprimieren(f) {
+  const bmp = await createImageBitmap(f); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.72);
+}
+// OCR-Dateien im Hintergrund vorladen, damit es auf der Baustelle offline geht
+function ocrVorladen() { if (!navigator.onLine) return; ['worker.min.js', 'deu.traineddata.gz', (typeof WebAssembly === 'object' ? 'tesseract-core-simd-lstm.wasm.js' : ''), 'tesseract-core-lstm.wasm.js'].filter(Boolean).forEach(f => fetch('vendor/tesseract/' + f).catch(() => { })) }
+
+// ---------------------------------------------------------------- Vorlage aus älterem Bericht
+function vorlageAus(h, nurKolonne) {
+  h = clone(h);
+  if (nurKolonne) {
+    const r = S.r; let n = 0;
+    h.personal.forEach(p => { if (!r.personal.some(x => x.name === p.name)) { r.personal.push({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} }); n++ } });
+    h.geraete.forEach(g => { if (!r.geraete.some(x => x.name === g.name)) r.geraete.push({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} }) });
+    saveDraft(); render(); toast(`${n} Mitarbeiter und ${h.geraete.length} Geräte übernommen`); return;
+  }
+  const n = neuerBericht();
+  Object.assign(n, { baunr: h.baunr, baustelle: h.baustelle, bauteil: h.bauteil, bauherr: h.bauherr, beginn: h.beginn, ende: h.ende, pause: h.pause,
+    aps: h.aps.map(a => ({ id: a.id, nr: a.nr, text: a.text })), personal: h.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} })), geraete: h.geraete.map(g => ({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} })) });
+  S.r = n; S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0);
+  toast(`Vorlage ${h.baunr} vom ${dateDe(h.datum)}: Baustelle, Pakete, Kolonne und Geräte übernommen – Stunden neu eintragen`, 4000);
+}
+function histPicker(titel, cb) {
+  const el = document.createElement('div'); el.className = 'sheet';
+  el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">${titel}</b><button class="btn small" data-close>✕</button></div><input type="search" placeholder="Suchen … Baustellen-Nr., Ort oder Datum" autocomplete="off"></div><div class="list"></div></div>`;
+  document.body.appendChild(el); const inp = el.querySelector('input'), list = el.querySelector('.list');
+  const draw = () => {
+    const q = inp.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    list.innerHTML = HIST.filter(h => { const hay = `${h.baunr} ${h.baustelle} ${h.bauteil} ${dateDe(h.datum)} ${h.aps.map(a => a.nr + ' ' + a.text).join(' ')}`.toLowerCase(); return q.every(x => hay.includes(x)) })
+      .map((h, i) => `<div class="it" data-h="${h.id}"><span><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)} ${esc(h.baustelle)}<br><small style="white-space:normal">${h.personal.length} Mitarbeiter · ${h.geraete.length} Geräte · AP ${h.aps.map(a => esc(a.nr)).join(', ')}</small></span>${i === 0 && !q.length ? '<small>zuletzt</small>' : ''}</div>`).join('') || '<div class="hint" style="padding:14px">Nichts gefunden.</div>';
+  };
+  draw(); inp.addEventListener('input', draw);
+  el.addEventListener('click', e => { if (e.target === el || e.target.closest('[data-close]')) { el.remove(); return } const it = e.target.closest('[data-h]'); if (!it) return; el.remove(); cb(HIST.find(h => h.id === it.dataset.h)) });
+}
+
+
+// ---------------------------------------------------------------- Gesprächsmodus („Telefonat“): App fragt, Polier antwortet per Sprache
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const TEL = { log: [], queue: [], rec: null, listening: false, voice: true, auto: true, mat: false, interim: '' };
+function levD(a, b, max) { let prev = Array.from({ length: b.length + 1 }, (_, i) => i); for (let i = 1; i <= a.length; i++) { const cur = [i]; let mn = i; for (let j = 1; j <= b.length; j++) { cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); if (cur[j] < mn) mn = cur[j] } if (mn > max) return max + 1; prev = cur } return prev[b.length] }
+const ZW = { null: 0, ein: 1, eins: 1, eine: 1, einen: 1, einer: 1, zwei: 2, zwo: 2, drei: 3, vier: 4, 'fünf': 5, fuenf: 5, sechs: 6, sieben: 7, acht: 8, neun: 9, zehn: 10, elf: 11, 'zwölf': 12, dreizehn: 13, vierzehn: 14, 'fünfzehn': 15, sechzehn: 16, siebzehn: 17, achtzehn: 18, neunzehn: 19, zwanzig: 20, 'dreißig': 30, vierzig: 40, 'fünfundvierzig': 45, 'fünfzig': 50 };
+function wz(s) {   // Zahlwörter → Ziffern
+  s = ' ' + String(s).toLowerCase().replace(/anderthalb|eineinhalb/g, '1.5').replace(/([a-zäöüß]+)einhalb/g, (m, w) => ZW[w] != null ? (ZW[w] + 0.5) : m) + ' ';
+  s = s.replace(/(\d+)\s*komma\s*(\d+)/g, '$1.$2').replace(/(\d),(\d)/g, '$1.$2');
+  return s.split(/(\s+)/).map(w => ZW[w.replace(/[.,!?]/g, '')] != null ? String(ZW[w.replace(/[.,!?]/g, '')]) : w).join('').replace(/(\d+)\s*komma\s*(\d+)/g, '$1.$2').trim();
+}
+const ja = a => /^\s*(ja|jo|jap|jawohl|genau|richtig|stimmt|passt|ok|okay|korrekt|klar|sicher|gerne|ja klar|auf jeden)/i.test(a);
+const nein = a => /^\s*(nein|nee|ne\b|nö|falsch|nicht|keine?|nichts|negativ|ohne)/i.test(a);
+const zahl = a => { const m = wz(a).match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null };
+function stunden(a) {
+  const s = wz(a); let m;
+  if ((m = s.match(/(\d+(?:\.\d+)?)\s*(?:stunden?|h)?\s*(?:und)?\s*(\d+)\s*min/))) return +m[1] + m[2] / 60;
+  let h = zahl(s); if (h == null) return null;
+  if (/dreiviertel|drei viertel/.test(s)) h += 0.75; else if (/\bhalb/.test(s) && !/\.\d/.test(String(h))) h += 0.5; else if (/viertel/.test(s)) h += 0.25;
+  return h;
+}
+function uhrzeit(a, ende) {
+  const s = wz(a).replace(/uhr/g, ' uhr '); let h = null, m = 0, x;
+  if ((x = s.match(/(\d{1,2})[:.](\d{2})/))) { h = +x[1]; m = +x[2] }
+  else if ((x = s.match(/halb\s*(\d{1,2})/))) { h = +x[1] - 1; m = 30 }
+  else if ((x = s.match(/viertel nach\s*(\d{1,2})/))) { h = +x[1]; m = 15 }
+  else if ((x = s.match(/(?:viertel vor|dreiviertel|drei viertel)\s*(\d{1,2})/))) { h = +x[1] - 1; m = 45 }
+  else if ((x = s.match(/(\d{1,2})\s*uhr\s*(\d{1,2})/))) { h = +x[1]; m = +x[2] }
+  else if ((x = s.match(/(\d{1,2})/))) { h = +x[1] }
+  if (h == null || h > 23 || m > 59) return null;
+  if (ende && h <= 9) h += 12;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+function pause(a) {
+  const s = wz(a); if (nein(a) || /keine/.test(s)) return '0:00';
+  let min = null;
+  if (/dreiviertel/.test(s)) min = 45; else if (/halbe/.test(s)) min = 30; else if (/viertel/.test(s)) min = 15;
+  else { const n = zahl(s); if (n != null) min = /stunde/.test(s) || n <= 3 ? n * 60 : n }
+  if (min == null) return null;
+  return PAUSEN.reduce((b, p) => Math.abs(toMin(p) - min) < Math.abs(toMin(b) - min) ? p : b, PAUSEN[0]);
+}
+function datumAus(a) {
+  const s = wz(a).toLowerCase(), d = new Date(); let x;
+  const iso = dt => { dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset()); return dt.toISOString().slice(0, 10) };
+  if (/vorgestern/.test(s)) { d.setDate(d.getDate() - 2); return iso(d) }
+  if (/gestern/.test(s)) { d.setDate(d.getDate() - 1); return iso(d) }
+  if (/heute/.test(s) || ja(a)) return iso(d);
+  const tage = ['sonntag', 'montag', 'dienstag', 'mittwoch', 'donnerstag', 'freitag', 'samstag'];
+  const ti = tage.findIndex(t => s.includes(t)); if (ti >= 0) { const diff = (d.getDay() - ti + 7) % 7 || 7; d.setDate(d.getDate() - diff); return iso(d) }
+  if ((x = s.match(/(\d{1,2})\.\s*(\d{1,2})\.?\s*(\d{2,4})?/))) { const y = x[3] ? (x[3].length === 2 ? '20' + x[3] : x[3]) : d.getFullYear(); return `${y}-${x[2].padStart(2, '0')}-${x[1].padStart(2, '0')}` }
+  return null;
+}
+const STOPW = new Set(['und', 'ohne', 'dazu', 'plus', 'auch', 'noch', 'war', 'ist', 'hat', 'der', 'die', 'das', 'mit', 'krank', 'urlaub', 'schlechtwetter', 'sonderurlaub', 'feiertag', 'schule', 'stunden', 'stunde', 'nicht', 'fehlt', 'heute', 'nur', 'bis', 'uhr', 'ab', 'den', 'dem', 'wie', 'gestern', 'zuletzt', 'letztes', 'mal', 'halb', 'viertel', 'dreiviertel', 'einhalb', 'minuten', 'grad', 'ja', 'nein', 'genau', 'richtig', 'okay'].concat(Object.keys(ZW)));
+function personenAus(text) {   // erkennt Mitarbeiter (Nachname, ggf. mit Vorname); unbekannte „Nachname Vorname“ → neu
+  const tok = String(text).split(/[^A-Za-zÄÖÜäöüß-]+/).filter(Boolean), low = tok.map(x => x.toLowerCase()), out = [], used = new Set();
+  const sur = m => m[0].toLowerCase().split(',')[0].trim(), vor = m => (m[0].toLowerCase().split(',')[1] || '').trim();
+  const istName = k => k >= 0 && k < tok.length && low[k].length >= 3 && !STOPW.has(low[k]) && !SD.ma.some(m => sur(m) === low[k]);
+  const add = m => { if (!out.some(o => o[0] === m[0])) out.push(m) };
+  low.forEach((w, i) => {
+    if (w.length < 3 || STOPW.has(w) || used.has(i)) return;
+    let C = SD.ma.filter(m => sur(m) === w), fuzzy = false;
+    if (!C.length && w.length >= 5) { C = SD.ma.filter(m => sur(m).length >= 5 && levD(w, sur(m), 1) <= 1); fuzzy = true; if (C.length > 1) return }
+    if (!C.length) return;
+    const nb = [i + 1, i - 1].find(k => istName(k) && !used.has(k));
+    if (nb != null) {
+      const c = C.find(m => vor(m).split(/\s+/).includes(low[nb]));
+      if (c) { add(c); used.add(nb) }
+      else if (!fuzzy) { const a = tok[i][0].toUpperCase() + tok[i].slice(1), b = tok[nb][0].toUpperCase() + tok[nb].slice(1); add([`${a}, ${b}`, '', '', 'neu']); used.add(nb) }
+      else add(C[0]);
+    } else add(C[0]);
+    used.add(i);
+  });
+  return out;
+}
+const neuP = m => ({ id: uid(), name: m[0], nr: m[1] || '', zus: '', h: {}, neu: !SD.ma.some(x => x[0] === m[0]) });
+function geraeteAus(text) {
+  const out = [];
+  wz(text).toLowerCase().split(/,|\bund\b|\bsowie\b/).forEach(seg => {
+    const nums = seg.match(/\d{3,5}/g) || [], tok = seg.split(/[^a-z0-9äöüß]+/).filter(t => t.length >= 2);
+    let best = null;
+    SD.ge.forEach(g => {
+      const n = g[0].toLowerCase(); let sc = 0;
+      if (nums.some(x => n.includes(x) || g[2] === x || g[1] === x)) sc += 10;
+      n.split(/[^a-z0-9äöüß]+/).filter(t => t.length >= 2 && t !== 'div').forEach(t => { if (tok.includes(t)) sc++ });
+      if ((sc >= 2 || (sc === 1 && tok.some(t => t.length >= 5 && n.includes(t)))) && (!best || sc > best.sc)) best = { g, sc };
+    });
+    if (best && !out.includes(best.g)) out.push(best.g);
+  });
+  return out;
+}
+const KZ = [[/sonderurlaub/, 'SU'], [/urlaub/, 'Ur'], [/krank/, 'Kr'], [/schlecht\s*wetter/, 'SW'], [/feiertag/, 'FE'], [/schule|fortbildung|unterweisung|lehrgang/, 'FU']];
+const namenListe = l => l.map(p => (p.name || p[0]).split(',')[0]).join(', ');
+function verteilen(r, std) {   // Stunden auf die Pakete im gleichen Verhältnis wie TEL.split
+  const sp = TEL.split || {}; const sum = Object.values(sp).reduce((a, b) => a + b, 0) || 1; const h = {}; let rest = std;
+  r.aps.forEach((a, i) => { const v = i === r.aps.length - 1 ? rest : Math.round(std * (sp[a.id] || 0) / sum * 4) / 4; h[a.id] = Math.max(0, v); rest -= v });
+  return h;
+}
+
+function apParse(a) {   // „AP 10, Planie hergestellt“ / „zehn Planie …“ → {nr, text} mit Original-Schreibweise
+  const tok = a.trim().split(/\s+/); const i = tok.findIndex(x => /^\d+[,.:]?$/.test(wz(x.replace(/[,.:]$/, ''))));
+  if (i < 0 || i > 3) return null; const nr = wz(tok[i].replace(/[,.:]$/, '')).replace(/\D/g, '');
+  let text = tok.slice(i + 1).join(' ').replace(/^[,.:\-\s]+/, '').trim(); if (!nr || !text) return null;
+  return { nr, text: text.charAt(0).toUpperCase() + text.slice(1) };
+}
+// Ablauf des Gesprächs: jede Frage mit Auswertung der Antwort
+function telAblauf() {
+  const r = S.r, H = HIST[0], Q = [];
+  const q = (id, ask, handle) => Q.push({ id, ask, handle });
+  if (H) q('vorlage', () => `Hallo${SET.polier ? ' ' + SET.polier.split(',').reverse().join(' ').trim() : ''}. Soll ich den letzten Bericht als Vorlage nehmen? Baustelle ${H.baunr}, ${H.baustelle}.`, a => {
+    if (ja(a)) { Object.assign(r, { baunr: H.baunr, baustelle: H.baustelle, bauteil: H.bauteil, bauherr: H.bauherr, beginn: H.beginn, ende: H.ende, pause: H.pause, aps: H.aps.map(x => ({ id: x.id, nr: x.nr, text: x.text })), personal: H.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} })), geraete: H.geraete.map(g => ({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} })) }); TEL.vorlage = true }
+    return true;
+  });
+  q('datum', () => `${H ? '' : 'Hallo. '}Ist der Bericht für heute?`, a => { const d = datumAus(a); if (d) { r.datum = d; return true } if (nein(a)) return 'Für welchen Tag dann? Zum Beispiel gestern oder Montag.'; return 'Das habe ich nicht verstanden. Für welchen Tag ist der Bericht?' });
+  if (!r.von) q('polier', () => 'Wie heißt du?', a => { const p = personenAus(a); if (p.length) { r.von = p[0][0]; return true } return 'Den Namen finde ich nicht in der Liste. Bitte nur den Nachnamen.' });
+  q('baustelle', () => TEL.vorlage ? `Baustelle ${r.baunr}, ${r.baustelle}. Stimmt das?` : 'Welche Baustelle? Sag die Baustellen-Nummer.', a => {
+    if (TEL.vorlage && ja(a)) return true;
+    const n = wz(a).match(/\d{3,6}/); if (!n) return 'Bitte die Baustellen-Nummer, zum Beispiel 2 6 0 2 5.';
+    r.baunr = n[0]; const h = HIST.find(x => x.baunr === r.baunr);
+    if (h) { r.baustelle = h.baustelle; r.bauteil = h.bauteil; r.bauherr = h.bauherr; TEL.say = `${h.baustelle}.` }
+    else { r.baustelle = ''; Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'bsname', ask: () => 'Die Baustelle kenne ich noch nicht. Wo ist sie, Ort und Auftraggeber?', handle: a => { r.baustelle = a.trim(); return true } }, { id: 'bauherr', ask: () => 'Wer ist der Bauherr? Wenn unklar, sag nein.', handle: a => { if (!nein(a)) r.bauherr = a.trim(); return true } }) }
+    return true;
+  });
+  q('wetter', () => 'Wie ist das Wetter und wie viel Grad hat es?', a => {
+    const s = a.toLowerCase(); const w = SD.wetter.find(x => s.includes(x.toLowerCase())) || (/sonne/.test(s) && SD.wetter.find(x => /sonn/i.test(x))) || (/wolk|bewölkt/.test(s) && SD.wetter.find(x => /bedeckt|bewölkt|wolk/i.test(x))) || (/regen|regnet/.test(s) && SD.wetter.find(x => /regen/i.test(x)));
+    if (w) r.wetter = w; const t = s.match(/(minus\s*)?(-?\d+)\s*(grad|°)?/) || wz(s).match(/(minus\s*)?(-?\d+)/); if (t) r.temp = String((t[1] ? -1 : 1) * Math.abs(+t[2]));
+    if (!r.wetter) return `Und welches Wetter? Zum Beispiel ${SD.wetter.slice(0, 3).join(', ')}.`;
+    return true;
+  });
+  q('beginn', () => TEL.vorlage ? `Arbeitszeit wie zuletzt, von ${r.beginn} bis ${r.ende}, Pause ${r.pause}? Oder wann war Arbeitsbeginn?` : 'Wann war Arbeitsbeginn?', a => {
+    if (TEL.vorlage && ja(a)) { TEL.skipZeit = true; return true }
+    const t = uhrzeit(a, false); if (!t) return 'Bitte die Uhrzeit, zum Beispiel sieben Uhr.'; r.beginn = t; return true;
+  });
+  q('ende', () => TEL.skipZeit ? '' : 'Und wann war Feierabend?', a => { const t = uhrzeit(a, true); if (!t) return 'Bitte die Uhrzeit, zum Beispiel halb fünf.'; r.ende = t; return true });
+  q('pause', () => TEL.skipZeit ? '' : 'Wie lange Pause?', a => { const p = pause(a); if (!p) return 'Wie viele Minuten Pause?'; r.pause = p; TEL.say = `Das sind ${fmt(dauer(r))} Stunden.`; return true });
+  q('aps', () => TEL.vorlage && !TEL.apsNeu && r.aps.some(a => a.nr) ? `Arbeitspakete wie zuletzt: ${r.aps.map(a => 'AP ' + a.nr + ', ' + a.text).join('. ')}. Stimmt das?` : 'Was habt ihr heute gemacht? Sag zuerst die AP-Nummer und dann die Arbeit.', a => {
+    if (TEL.vorlage && !TEL.apsNeu && r.aps.some(x => x.nr)) { if (ja(a)) return true; r.aps = []; TEL.apsNeu = true; return 'Gut, dann neu. Sag die AP-Nummer und die Arbeit.' }
+    const m = apParse(a); if (!m) return 'Bitte so: AP-Nummer, dann was gemacht wurde. Zum Beispiel: 10, Planie hergestellt.';
+    if (!r.aps.length || r.aps[0].nr || r.aps[0].text) r.aps.push({ id: uid(), nr: '', text: '' }); const ap = r.aps[r.aps.length - 1]; ap.nr = m.nr; ap.text = m.text;
+    Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'apmehr', ask: () => 'Noch ein Arbeitspaket?', handle: b => { if (nein(b) || r.aps.length >= 7) return true; if (ja(b) && b.trim().split(/\s+/).length < 3) { TEL.cur.ask = () => 'Welche AP-Nummer und welche Arbeit?'; return 'Welche AP-Nummer und welche Arbeit?' } const x = apParse(b.replace(/^\s*(ja|jo|genau)[,.!]?\s*/i, '')); if (!x) return 'Bitte AP-Nummer und Arbeit, oder nein.'; r.aps.push({ id: uid(), nr: x.nr, text: x.text }); return r.aps.length >= 7 ? true : 'Notiert. Noch ein Arbeitspaket?' } });
+    return true;
+  });
+  q('kolonne', () => TEL.vorlage && r.personal.length ? `Kolonne wie zuletzt: ${namenListe(r.personal)}. Stimmt das?` : `Wer war heute dabei?${HIST.length ? ' Du kannst auch sagen: wie letztes Mal.' : ''}`, a => {
+    if (TEL.vorlage && r.personal.length && ja(a)) return true;
+    if (/wie (gestern|letztes|zuletzt|immer)|gleiche/i.test(a) && H) { r.personal = H.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} })); TEL.say = `Übernommen: ${namenListe(r.personal)}.`; return true }
+    const p = personenAus(a); const ohne = /ohne|nicht|fehlt|weg/i.test(a);
+    if (!p.length) { const kol = TEL.cur; const nm = a.replace(/^(dazu|plus|auch|noch)\s+/i, '').trim(); if (nm.split(/\s+/).length <= 3 && !ohne) { Q.splice(Q.indexOf(TEL.cur), 0, { id: 'neuma', ask: () => `${nm} finde ich nicht in der Liste. Als neuen Mitarbeiter eintragen?`, handle: c => { if (ja(c)) { if (!/dazu|plus|auch|noch/i.test(a)) r.personal = []; r.personal.push({ id: uid(), name: nm, nr: '', zus: '', h: {}, neu: true }); Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok2', ask: () => `Ich habe: ${namenListe(r.personal)}. Noch jemand? Sonst sag nein.`, handle: d => { if (nein(d) || ja(d) && d.trim().split(/\s+/).length < 2) return true; const pp = personenAus(d); pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.pushneuP(m) }); if (!pp.length) r.personal.push({ id: uid(), name: d.replace(/^(dazu|plus|und)\s+/i, '').trim(), nr: '', zus: '', h: {}, neu: true }); return `Jetzt: ${namenListe(r.personal)}. Noch jemand?` } }); } else Q.splice(Q.indexOf(TEL.cur) + 1, 0, kol); return true } }); return true } return 'Ich habe keinen Namen erkannt. Bitte die Nachnamen nennen.' }
+    const neu = m => neuP(m);
+    if (ohne && r.personal.length) r.personal = r.personal.filter(x => !p.some(m => m[0] === x.name));
+    else if (/dazu|plus|auch|noch/i.test(a)) p.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.push(neu(m)) });
+    else r.personal = p.map(neu);
+    Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok', ask: () => `Ich habe: ${namenListe(r.personal)}. Stimmt das?`, handle: b => { if (ja(b)) return true; const pp = personenAus(b); if (!pp.length) return 'Wen soll ich ergänzen oder streichen? Zum Beispiel: ohne Braun, oder: dazu Hagel.'; if (/ohne|nicht|weg|streich/i.test(b)) r.personal = r.personal.filter(x => !pp.some(m => m[0] === x.name)); else pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.pushneuP(m) }); return `Jetzt: ${namenListe(r.personal)}. Stimmt das?` } });
+    return true;
+  });
+  q('abwesend', () => 'War jemand krank, im Urlaub oder Schlechtwetter?', a => {
+    if (nein(a)) return true;
+    let n = 0; a.toLowerCase().split(/,|\bund\b/).forEach(seg => { const k = KZ.find(([re]) => re.test(seg)); const p = personenAus(seg); if (k && p.length) p.forEach(m => { let x = r.personal.find(y => y.name === m[0]); if (!x) { x = neuP(m); r.personal.push(x) } x.zus = k[1]; x.h = {}; n++ }) });
+    if (!n) return 'Bitte so: Name und Grund, zum Beispiel: Spatafora Schlechtwetter. Oder nein.';
+    return true;
+  });
+  q('stunden', () => !r.aps.length || !r.personal.length ? '' : r.aps.length > 1 ? `Wie viele Stunden auf AP ${r.aps[0].nr}?` : `Alle ${fmt(dauer(r))} Stunden auf AP ${r.aps[0] && r.aps[0].nr}?`, a => {
+    const d = dauer(r);
+    if (r.aps.length === 1) { if (!ja(a)) { const h = stunden(a); if (h == null) return 'Wie viele Stunden?'; TEL.std = h } else TEL.std = d; TEL.split = { [r.aps[0].id]: 1 } }
+    else {
+      const h = stunden(a); if (h == null) return `Wie viele Stunden auf AP ${r.aps[0].nr}?`; TEL.split = { [r.aps[0].id]: h };
+      r.aps.slice(1, -1).forEach(ap => Q.splice(Q.indexOf(TEL.cur) + 1 + r.aps.indexOf(ap) - 1, 0, { id: 'std' + ap.id, ask: () => `Und auf AP ${ap.nr}?`, handle: b => { const x = stunden(b); if (x == null) return `Wie viele Stunden auf AP ${ap.nr}?`; TEL.split[ap.id] = x; return true } }));
+      TEL.std = d;
+    }
+    return true;
+  });
+  q('stdfertig', () => { if (!r.aps.length || !r.personal.length) return ''; if (!TEL.split) TEL.split = { [r.aps[0].id]: 1 }; if (TEL.std == null) TEL.std = dauer(r); const last = r.aps[r.aps.length - 1]; if (r.aps.length > 1) { const used = r.aps.slice(0, -1).reduce((s, a) => s + (TEL.split[a.id] || 0), 0); TEL.split[last.id] = Math.max(0, dauer(r) - used) } r.personal.forEach(p => { if (!p.zus) p.h = verteilen(r, TEL.std) }); return `${r.aps.length > 1 ? 'Rest auf AP ' + last.nr + '. ' : ''}Hat jemand abweichende Stunden? Zum Beispiel: Segmehl 8 Stunden. Sonst nein.` }, a => {
+    if (nein(a)) return true; const p = personenAus(a), h = stunden(a.replace(/^[^\d]*?(?=\d|ein|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf)/i, ''));
+    if (!p.length || h == null) return 'Bitte Name und Stunden, oder nein.';
+    p.forEach(m => { const x = r.personal.find(y => y.name === m[0]); if (x) { x.zus = ''; x.h = verteilen(r, h) } });
+    return `${namenListe(p)}: ${fmt(h)} Stunden. Noch jemand?`;
+  });
+  q('geraete', () => TEL.vorlage && r.geraete.length ? `Geräte wie zuletzt: ${r.geraete.map(g => g.name).join(', ')}. Stimmt das?` : 'Welche Geräte waren im Einsatz? Sonst sag keine.', a => {
+    if (TEL.vorlage && r.geraete.length && ja(a)) return true;
+    if (nein(a)) { r.geraete = []; return true }
+    if (/wie (gestern|letztes|zuletzt)/i.test(a) && H) { r.geraete = H.geraete.map(g => ({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} })); return true }
+    const g = geraeteAus(a); if (!g.length) return 'Gerät nicht gefunden. Sag den Namen mit Nummer, zum Beispiel: Walze BW 100, 6923.';
+    r.geraete = g.map(x => ({ id: uid(), name: x[0], nr: x[1], ks: x[2], firma: '', h: {} })); TEL.say = `Ich habe: ${r.geraete.map(x => x.name).join(', ')}.`;
+    return true;
+  });
+  q('gerstd', () => r.geraete.length ? 'Liefen alle Geräte genauso lange wie die Kolonne?' : '', a => {
+    if (!r.geraete.length) return true;
+    if (ja(a)) { r.geraete.forEach(g => g.h = verteilen(r, TEL.std || dauer(r))); return true }
+    r.geraete.forEach(g => g.h = verteilen(r, TEL.std || dauer(r)));
+    r.geraete.slice().reverse().forEach(g => Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'g' + g.id, ask: () => `Wie viele Stunden lief ${g.name}?`, handle: b => { const h = nein(b) ? 0 : stunden(b); if (h == null) return 'Wie viele Stunden?'; g.h = verteilen(r, h); return true } }));
+    return true;
+  });
+  q('mat', () => 'Gab es heute Lieferscheine? Die fotografierst du gleich danach.', a => { TEL.mat = !nein(a); return true });
+  q('bem', () => 'Bemerkungen oder abweichende Arbeitszeiten? Sonst nein.', a => { if (!nein(a)) r.bem = a.trim(); return true });
+  q('vork', () => 'Wichtige Vorkommnisse oder Besprechungen fürs Bautagebuch? Sonst nein.', a => { if (!nein(a)) r.vork = a.trim(); return true });
+  return Q;
+}
+function telStart() {
+  if (!S.r || S.r._gesendet) S.r = neuerBericht();
+  TEL.log = []; TEL.vorlage = false; TEL.apsNeu = false; TEL.skipZeit = false; TEL.mat = false; TEL.split = null; TEL.std = null; TEL.queue = telAblauf();
+  S.view = 'telefon'; render(); telNext();
+}
+async function telNext() {
+  if (S.view !== 'telefon') return;
+  let q = TEL.queue[0];
+  while (q) { TEL.cur = q; const t = q.ask(); if (t) { TEL.frage = t; break } TEL.queue.shift(); q = TEL.queue[0] }
+  if (!q) return telEnde();
+  const pre = TEL.say ? TEL.say + ' ' : ''; TEL.say = '';
+  telBot(pre + TEL.frage);
+}
+async function telBot(text) {
+  TEL.log.push({ bot: true, t: text }); telRender();
+  await sag(text);
+  if (S.view === 'telefon' && TEL.auto && SR) hoeren();
+}
+function telAntwort(text) {
+  text = String(text || '').trim(); if (!text || S.view !== 'telefon') return;
+  stopHoeren(); TEL.log.push({ bot: false, t: text }); TEL.interim = '';
+  if (/^(beenden|abbrechen|stopp|stop|schluss|ende)\b/i.test(text)) return telEnde(true);
+  if (/^(überspringen|weiter|nächste)\b/i.test(text)) { TEL.queue.shift(); saveDraft(); return telNext() }
+  if (/^(wiederholen|nochmal|wie bitte)\b/i.test(text)) return telBot(TEL.frage);
+  const q = TEL.cur; let res;
+  try { res = q.handle(text) } catch (e) { console.error(e); res = 'Das hat nicht geklappt. Bitte nochmal.' }
+  saveDraft();
+  if (res === true) { TEL.queue.splice(TEL.queue.indexOf(q), 1); telNext() }
+  else { TEL.frage = res; telBot(res) }
+}
+async function telEnde(abbruch) {
+  stopHoeren(); try { speechSynthesis.cancel() } catch (e) { }
+  const r = S.r; if (!r.aps.length) r.aps.push({ id: uid(), nr: '', text: '' });
+  saveDraft(); S.view = 'erfassung'; S.step = TEL.mat ? 4 : 5; render(); scrollTo(0, 0);
+  const t = abbruch ? 'Gespräch beendet. Du kannst im Formular weitermachen.' : TEL.mat ? 'Danke. Fotografiere jetzt die Lieferscheine, dann unterschreiben und senden.' : 'Danke, alles eingetragen. Bitte prüfen, unterschreiben und senden.';
+  toast(t, 5000); sag(t);
+}
+function sag(text) {
+  return new Promise(res => {
+    if (!TEL.voice || !('speechSynthesis' in window)) return res();
+    try {
+      speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text.replace(/AP (\d)/g, 'A P $1')); u.lang = 'de-DE'; u.rate = 1.05;
+      const v = speechSynthesis.getVoices().find(v => /^de/i.test(v.lang)); if (v) u.voice = v;
+      let done = false; const fin = () => { if (!done) { done = true; res() } }; u.onend = fin; u.onerror = fin; setTimeout(fin, 4000 + text.length * 90);
+      speechSynthesis.speak(u);
+    } catch (e) { res() }
+  });
+}
+function hoeren() {
+  if (!SR || TEL.listening) return;
+  try {
+    const rec = new SR(); TEL.rec = rec; rec.lang = 'de-DE'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+    let final = '';
+    rec.onresult = e => { let it = ''; for (let i = e.resultIndex; i < e.results.length; i++) { if (e.results[i].isFinal) final += e.results[i][0].transcript; else it += e.results[i][0].transcript } TEL.interim = final + it; const el = $('#interim'); if (el) el.textContent = TEL.interim };
+    rec.onerror = e => { TEL.listening = false; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { TEL.auto = false; toast('Mikrofon nicht erlaubt – bitte über die Tastatur antworten', 4000) } telRender() };
+    rec.onend = () => { TEL.listening = false; TEL.rec = null; if (final.trim()) telAntwort(final); else telRender() };
+    rec.start(); TEL.listening = true; telRender();
+  } catch (e) { TEL.listening = false; telRender() }
+}
+function stopHoeren() { if (TEL.rec) { try { TEL.rec.onend = null; TEL.rec.abort() } catch (e) { } } TEL.rec = null; TEL.listening = false }
+function vTelefon() {
+  return `<div id="tellog" class="tellog">${TEL.log.map(l => `<div class="bub ${l.bot ? 'bot' : 'me'}">${esc(l.t)}</div>`).join('')}
+  ${TEL.listening ? `<div class="bub me live"><span id="interim">${esc(TEL.interim) || '…'}</span></div>` : ''}</div>`;
+}
+function telRender() {
+  if (S.view !== 'telefon') return;
+  $('#main').innerHTML = vTelefon();
+  $('#foot').style.display = 'block';
+  $('#foot').innerHTML = `<div class="telbar">
+   ${SR ? `<button class="micbtn ${TEL.listening ? 'on' : ''}" data-act="mic" aria-label="Sprechen">${TEL.listening ? '■' : '🎤'}</button>` : ''}
+   <form id="telform" style="flex:1;display:flex;gap:6px"><input id="telin" placeholder="${SR ? 'oder hier tippen/diktieren …' : 'Antwort tippen oder 🎤 der Tastatur …'}" autocomplete="off" enterkeyhint="send"><button class="btn small orange" type="submit">➤</button></form></div>
+   <div class="row" style="margin-top:6px"><button class="btn small ghost" data-act="telwdh">🔁 Wiederholen</button><button class="btn small ghost" data-act="telskip">⏭ Überspringen</button><button class="btn small ghost" data-act="telvoice">${TEL.voice ? '🔊' : '🔇'}</button><button class="btn small danger" data-act="telende">Beenden</button></div>`;
+  $('#telform').onsubmit = e => { e.preventDefault(); const v = $('#telin').value; $('#telin').value = ''; telAntwort(v) };
+  const lg = $('#tellog'); if (lg) lg.lastElementChild && lg.lastElementChild.scrollIntoView({ block: 'end' });
+}
+
 // ---------------------------------------------------------------- Prüfregeln
 function pruefe(r) {
   const o = [], d = dauer(r);
@@ -260,6 +682,7 @@ function pruefe(r) {
   if (r.aps.length > 7) o.push({ t: 'e', s: 1, m: 'Maximal 7 Arbeitspakete pro Tagesbericht.' });
   if (!r.personal.length) o.push({ t: 'e', s: 2, m: 'Kein Personal eingetragen.' });
   if (r.personal.length > 14) o.push({ t: 'w', s: 2, m: 'Mehr als 14 Personen – Formular wird länger als eine Seite.' });
+  r.personal.forEach(p => { if (p.neu && !p.nr) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: neu, nicht in der Mitarbeiterliste – Büro ergänzt die Pers.-Nr.` }) });
   r.personal.forEach(p => { if (p.zus) return; const s = sumH(p); if (!s) o.push({ t: 'e', s: 2, m: `${esc(p.name)}: keine Stunden und kein Kürzel.` }); else if (Math.abs(s - d) > 0.01) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: ${fq(s)} h, Arbeitszeit ist ${fq(d)} h.` }) });
   r.geraete.forEach(g => { if (!sumH(g)) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: keine Stunden.` }); if (/miet/i.test(g.name) && !g.firma) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: Mietfirma fehlt.` }) });
   r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge)) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (!m.ls) o.push({ t: 'w', s: 4, m: `${esc(m.mat || 'Material')}: Lieferschein-Nr. fehlt.` }); else if (!m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto.` }) });
@@ -379,7 +802,7 @@ function openPicker(kind, cb, selected = []) {
   if (kind === 'mat') { title = 'Material'; items = SD.mat.map(m => ({ v: m[0], sub: (m[2] ? m[2] + ' · ' : '') + m[1], g: m[3], raw: m })) }
   if (kind === 'lief') { title = 'Lieferant'; items = SD.lief.map(l => ({ v: l, sub: '', g: '', raw: [l] })) }
   const sel = new Set(selected), el = document.createElement('div'); el.className = 'sheet';
-  el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">${title} ${multi ? '<span class="hint">(mehrere möglich)</span>' : ''}</b><button class="btn small" data-close>${multi ? 'Fertig' : '✕'}</button></div><input type="search" placeholder="Suchen … Name, Teil davon oder Nummer" autocomplete="off"></div><div class="list"></div></div>`;
+  el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">${title} ${multi ? '<span class="hint">(mehrere möglich)</span>' : ''}</b><button class="btn small" data-close>${multi ? 'Fertig' : '✕'}</button></div><input type="search" placeholder="${kind === 'ma' ? 'Suchen … oder neuen Namen eintippen (Nachname, Vorname)' : 'Suchen … Name, Teil davon oder Nummer'}" autocomplete="off"></div><div class="list"></div></div>`;
   document.body.appendChild(el);
   const inp = el.querySelector('input'), list = el.querySelector('.list');
   const draw = () => {
@@ -391,7 +814,7 @@ function openPicker(kind, cb, selected = []) {
       h += `<div class="it ${sel.has(it.v) ? 'sel' : ''}" data-v="${esc(it.v)}"><span>${lab}</span><small>${esc(it.sub)}</small></div>`; n++;
       if (n > 300) break;
     }
-    if (inp.value.trim() && (kind === 'lief' || kind === 'mat' || kind === 'ge')) h += `<div class="it" data-free="1"><span>„${esc(inp.value.trim())}“ als eigenen Eintrag übernehmen</span></div>`;
+    if (inp.value.trim()) h += `<div class="it" data-free="1"><span>＋ „${esc(inp.value.trim())}“ ${kind === 'ma' || kind === 'polier' ? 'als neuen Mitarbeiter eintragen' : 'als eigenen Eintrag übernehmen'}</span></div>`;
     else if (!n) h = '<div class="hint" style="padding:14px">Nichts gefunden.</div>';
     list.innerHTML = h;
   };
@@ -468,8 +891,8 @@ async function dateienErzeugen(r) {
     new File([JSON.stringify(d, null, 1)], base.replace('%', 'DATEN') + '.txt', { type: 'text/plain' })
   ];
 }
-const betreff = r => `Tagesbericht ${r.baunr} ${dateDe(r.datum)} – ${r.von}`;
-const mailText = r => `Tagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
+const betreff = r => `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
+const mailText = r => `Betreff: ${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
 // ---------------------------------------------------------------- Versand
 function overlay(html) { let o = $('#ov'); if (!o) { o = document.createElement('div'); o.id = 'ov'; o.className = 'overlay'; document.body.appendChild(o) } o.innerHTML = `<div class="box2">${html}</div>`; return o }
@@ -486,13 +909,15 @@ function zeigeVersand(hinweis = '') {
   const { r, files } = S.prepared, kann = !!(navigator.canShare && navigator.canShare({ files }));
   overlay(`<b style="font-size:18px">Bericht ist fertig ✓</b>${hinweis}
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
-  ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b></p>
+  <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
+  ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b><br>Der Betreff wird mitgegeben. Falls das Betreff-Feld leer bleibt: lange hineintippen → <b>Einsetzen</b> (er ist schon kopiert).</p>
     <button class="btn orange full big" data-act="share">📤 Senden</button>`
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
 async function share() {
   const { r, files } = S.prepared;
+  try { await navigator.clipboard.writeText(betreff(r)) } catch (e) { }
   try { await navigator.share({ files, title: betreff(r), text: mailText(r) }); await abgeschlossen('mail') }
   catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich: ' + e.message); }
 }
@@ -527,7 +952,7 @@ const kurz = r => ({ id: r.id, datum: r.datum, baunr: r.baunr, baustelle: r.baus
 async function abgeschlossen(weg, wartet) {
   const r = S.prepared.r;
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
-  HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30);
+  HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
   await DB.set('history', HIST); await DB.del('draft'); S.r = null; S.prepared = null;
   overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
   <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
@@ -547,24 +972,33 @@ document.addEventListener('click', async e => {
   if (ds.delfoto) { const [id, i] = ds.delfoto.split('|'); const m = r.material.find(x => x.id === id); m.fotos.splice(+i, 1); saveDraft(); render(); return }
   if (ds.zus) { const [id, z] = ds.zus.split('|'); const p = r.personal.find(x => x.id === id); p.zus = p.zus === z ? '' : z; saveDraft(); render(); return }
   if (ds.st) { const [k, id, ap, dv] = ds.st.split('|'); const it = r[k].find(x => x.id === id); it.h[ap] = Math.max(0, num(it.h[ap]) + num(dv)); saveDraft(); render(); return }
+  if (ds.vorlage) { const h = HIST.find(x => x.id === ds.vorlage); if (h) vorlageMitPruefung(h); return }
   if (ds.resend) { const h = HIST.find(x => x.id === ds.resend); if (h) prepare(clone(h)); return }
   if (ds.pick) {
     const [k, id] = ds.pick.split('|');
     if (k === 'von') openPicker('polier', m => { r.von = m[0] });
-    if (k === 'lief') openPicker('lief', l => { r.material.find(x => x.id === id).lief = l[0] });
-    if (k === 'mat') openPicker('mat', m => { const x = r.material.find(x => x.id === id); x.mat = m[0]; x.matnr = m[1] || ''; x.einh = m[2] || ''; if (!x.lief && ['MKB', 'BSR'].includes(m[3])) x.lief = m[3] });
+    if (k === 'lief') openPicker('lief', l => { const x = r.material.find(x => x.id === id); x.lief = l[0]; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('lief')) });
+    if (k === 'mat') openPicker('mat', m => { const x = r.material.find(x => x.id === id); x.mat = m[0]; x.matnr = m[1] || ''; x.einh = m[2] || ''; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('mat')); if (!x.lief && ['MKB', 'BSR'].includes(m[3])) x.lief = m[3] });
     return;
   }
   const a = ds.act; if (!a) return;
+  if (a === 'telefon') { if (S.r && (S.r.personal.length || S.r.baustelle) && !(await bestaetigen('Es gibt schon einen Entwurf. Neuen Bericht per Gespräch beginnen? Der Entwurf wird ersetzt.'))) return; S.r = null; telStart() }
+  if (a === 'mic') { if (TEL.listening) { const r2 = TEL.rec; if (r2) r2.stop() } else { try { speechSynthesis.cancel() } catch (e) { } hoeren() } }
+  if (a === 'telwdh') telBot(TEL.frage);
+  if (a === 'telskip') telAntwort('überspringen');
+  if (a === 'telvoice') { TEL.voice = !TEL.voice; if (!TEL.voice) try { speechSynthesis.cancel() } catch (e) { } telRender() }
+  if (a === 'telende') telEnde(true);
   if (a === 'install' && installEvt) { installEvt.prompt(); installEvt = null }
   if (a === 'neu') { S.r = neuerBericht(); S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0) }
   if (a === 'weiter') { S.view = 'erfassung'; render() }
   if (a === 'verwerfen') { if (await bestaetigen('Entwurf wirklich löschen?')) { S.r = null; await DB.del('draft'); render() } }
-  if (a === 'vorlage') { const h = clone(HIST[0]); const n = neuerBericht(); Object.assign(n, { baunr: h.baunr, baustelle: h.baustelle, bauteil: h.bauteil, bauherr: h.bauherr, beginn: h.beginn, ende: h.ende, pause: h.pause, aps: h.aps, personal: h.personal.map(p => Object.assign(p, { h: {}, zus: '' })), geraete: h.geraete.map(g => Object.assign(g, { h: {} })) }); S.r = n; S.step = 0; S.view = 'erfassung'; saveDraft(); render(); toast('Baustelle, Pakete, Kolonne und Geräte übernommen – Stunden bitte neu eintragen') }
+  if (a === 'vorlage') vorlageMitPruefung(HIST[0]);
+  if (a === 'vorlagewahl') histPicker('Bericht als Vorlage wählen', h => vorlageMitPruefung(h));
+  if (a === 'kolonnewahl') histPicker('Kolonne übernehmen aus …', h => vorlageAus(h, true));
   if (a === 'next') { S.step = Math.min(5, S.step + 1); render(); scrollTo(0, 0) }
   if (a === 'prev') { S.step = Math.max(0, S.step - 1); render(); scrollTo(0, 0) }
   if (a === 'addap') { r.aps.push({ id: uid(), nr: '', text: '' }); saveDraft(); render() }
-  if (a === 'addma') openPicker('ma', (m, add) => { if (add) r.personal.push({ id: uid(), name: m[0], nr: m[1], zus: '', h: {} }); else r.personal = r.personal.filter(p => p.name !== m[0]) }, r.personal.map(p => p.name));
+  if (a === 'addma') openPicker('ma', (m, add) => { if (add) r.personal.push({ id: uid(), name: m[0], nr: m[1], zus: '', h: {}, neu: !SD.ma.some(x => x[0] === m[0]) }); else r.personal = r.personal.filter(p => p.name !== m[0]) }, r.personal.map(p => p.name));
   if (a === 'addge') openPicker('ge', (g, add) => { if (add) r.geraete.push({ id: uid(), name: g[0], nr: g[1], ks: g[2], firma: '', h: {} }); else r.geraete = r.geraete.filter(x => x.name !== g[0]) }, r.geraete.map(g => g.name));
   if (a === 'addmat') { r.material.push({ id: uid(), ap: r.aps[0].id, lief: '', mat: '', matnr: '', einh: '', ls: '', menge: '', fotos: [] }); saveDraft(); render() }
   if (a === 'dupmat') { const l = r.material[r.material.length - 1]; r.material.push({ id: uid(), ap: l.ap, lief: l.lief, mat: l.mat, matnr: l.matnr, einh: l.einh, ls: '', menge: '', fotos: [] }); saveDraft(); render(); setTimeout(() => { const i = document.querySelectorAll('[data-k=ls]'); i[i.length - 1].focus() }, 50) }
@@ -604,9 +1038,10 @@ document.addEventListener('input', e => {
     if (ds.f === 'baunr') { const h = HIST.find(x => x.baunr === t.value.trim()); if (h && !r.baustelle) { r.baustelle = h.baustelle; r.bauteil = h.bauteil; r.bauherr = h.bauherr; ['baustelle', 'bauteil', 'bauherr'].forEach(k => { const i = document.querySelector(`[data-f=${k}]`); if (i) i.value = r[k] }); toast('Baustellendaten vom letzten Bericht übernommen') } }
   }
   if (ds.ap) r.aps.find(a => a.id === ds.ap)[ds.k] = t.value;
-  if (ds.m) { const m = r.material.find(x => x.id === ds.m); m[ds.k] = ds.k === 'menge' ? t.value.replace(',', '.') : t.value }
+  if (ds.m) { const m = r.material.find(x => x.id === ds.m); m[ds.k] = ds.k === 'menge' ? t.value.replace(',', '.') : t.value; if (m.ocr) { m.ocr.auto = m.ocr.auto.filter(f => f !== ds.k); t.classList.remove('ocr') } }
   if (ds.hin) { const [k, id, ap] = ds.hin.split('|'); r[k].find(x => x.id === id).h[ap] = num(t.value) }
   if (ds.g) r.geraete.find(x => x.id === ds.g).firma = t.value;
+  if (ds.pnr) r.personal.find(x => x.id === ds.pnr).nr = t.value.trim();
   saveDraft();
 });
 document.addEventListener('change', async e => {
@@ -621,6 +1056,8 @@ document.addEventListener('change', async e => {
   if (ds.f && ['datum', 'beginn', 'ende'].includes(ds.f)) render();
   if (ds.k === 'ap' && ds.m) render();
   if (ds.hin) render();
+  if (ds.scan && t.files.length) { await scanLieferscheine([...t.files]); t.value = ''; return }
+  if (ds.foto && t.files[0] && !S.r.material.find(x => x.id === ds.foto).fotos.length) { await scanLieferscheine([t.files[0]], ds.foto); t.value = ''; return }
   if (ds.foto && t.files[0]) {
     const m = S.r.material.find(x => x.id === ds.foto), f = t.files[0];
     try {

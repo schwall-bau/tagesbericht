@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Schwall Tagesbericht</title>
-<meta name="theme-color" content="#1e1e1e">
+<meta name="theme-color" content="#ED7102">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Tagesbericht">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -18,7 +18,7 @@
 <div id="app">
   <header>
     <div class="row" style="align-items:center;justify-content:space-between">
-      <div style="flex:none"><img class="logo" src="icons/logo-white.png" alt="Schwall Bauunternehmung GmbH" style="height:38px;display:block;margin-bottom:4px"><h1 id="htitle" style="font-size:14px;margin:0">Tagesbericht</h1><small id="hsub"></small></div>
+      <div style="flex:none"><img class="logo" src="icons/logo-header.png" alt="Schwall Bauunternehmung GmbH" style="height:38px;display:block;margin-bottom:4px"><h1 id="htitle" style="font-size:14px;margin:0">Tagesbericht</h1><small id="hsub"></small></div>
       <div style="flex:none;text-align:right"><button id="hbtn" class="btn small ghost" style="display:none"></button></div>
     </div>
     <div class="steps" id="steps"></div>
@@ -30,6 +30,7 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="vendor/html2canvas.min.js"></script>
 <script src="vendor/xlsx.mini.min.js"></script>
+<script src="vendor/tesseract/tesseract.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

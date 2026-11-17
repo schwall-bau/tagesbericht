@@ -1,10 +1,10 @@
 // Service Worker: macht die App offline nutzbar (Baustelle ohne Netz).
 // Bei jeder neuen Version VERSION erhöhen, damit die Handys das Update laden.
-const VERSION = 'tb-1.0.0';
+const VERSION = 'tb-1.3.0';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest',
-  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js',
-  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
+  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js',
+  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/logo-header.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', e => {
@@ -23,5 +23,6 @@ self.addEventListener('fetch', e => {
     e.respondWith(fetch(req).then(r => { const c = r.clone(); caches.open(VERSION).then(x => x.put(req, c)); return r; }).catch(() => caches.match(req)));
     return;
   }
-  e.respondWith(caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req)));
+  // Cache zuerst; was neu aus dem Netz kommt (z. B. Texterkennung), wird für offline gespeichert
+  e.respondWith(caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(x => x.put(req, c)) } return r })));
 });
