@@ -1,87 +1,130 @@
 'use strict';
-/* Füllt die Original-Excel-Vorlage (Blatt „Blanko“: Tagesbericht Zeile 1–50, Bautagebuch ab Zeile 51)
-   mit den Daten eines Berichts. Formatierung, Formeln und Auswahllisten der Vorlage bleiben erhalten,
-   damit das Büro die Datei wie gewohnt bearbeiten kann. Zusätzlich ein Blatt „Lohn“ (eine Zeile je Mitarbeiter/AP). */
+/* Füllt die Original-Excel-Vorlage (Blatt „Blanko“: Tagesbericht Zeile 1–50, Bautagebuch ab Zeile 51).
+   Es werden NUR Zellwerte in der von Excel gespeicherten Datei ersetzt – Formatierung, Formeln, Auswahllisten,
+   Tabellen und Druckeinstellungen bleiben unverändert. Dazu kommen Unterschrift (Bild) und ein Blatt „Lohn“. */
 (function (root) {
   const AP_COLS = ['J', 'L', 'N', 'P', 'R', 'T', 'V'];
   const n = v => { const x = parseFloat(String(v ?? '').replace(',', '.')); return isNaN(x) ? 0 : x };
-  const zahlOderText = v => /^\d+$/.test(String(v || '').trim()) ? parseInt(v, 10) : (v || null);
+  const zahlOderText = v => /^\d+$/.test(String(v ?? '').trim()) ? parseInt(v, 10) : (v || null);
   const zeit = t => { if (!t) return null; const [h, m] = t.split(':').map(Number); return (h * 60 + (m || 0)) / 1440 };
+  const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  const colNr = c => [...c].reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0);
   const umbrechen = (t, max) => { const out = []; String(t || '').split(/\n/).forEach(p => { let l = ''; p.split(/\s+/).forEach(w => { if (!w) return; if ((l + ' ' + w).trim().length > max) { if (l) out.push(l); l = w } else l = (l + ' ' + w).trim() }); if (l) out.push(l) }); return out };
+  const serial = iso => { const [y, m, d] = iso.split('-').map(Number); return (Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 864e5 };
 
-  async function excelFuellen(ExcelJS, vorlage, r, SD, sig, logo) {
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(vorlage);
-    const ws = wb.getWorksheet('Blanko') || wb.worksheets[0];
-    const set = (adr, v) => { ws.getCell(adr).value = (v === '' || v === undefined) ? null : v };
-    const [y, mo, d] = r.datum.split('-').map(Number);
-    set('B8', new Date(Date.UTC(y, mo - 1, d)));
-    set('B11', r.baustelle); set('B12', r.bauteil); set('B14', zahlOderText(r.baunr));
-    set('E14', r.temp === '' ? null : n(r.temp)); set('E15', r.wetter);
+  function zellXml(ref, s, val) {
+    const sa = s ? ` s="${s}"` : '';
+    if (val === null || val === undefined || val === '') return `<c r="${ref}"${sa}/>`;
+    if (typeof val === 'number' && isFinite(val)) return `<c r="${ref}"${sa}><v>${val}</v></c>`;
+    return `<c r="${ref}"${sa} t="inlineStr"><is><t xml:space="preserve">${esc(val)}</t></is></c>`;
+  }
+  // Wert einer Zelle setzen (Stil bleibt); fehlt die Zelle oder Zeile, wird sie an der richtigen Stelle eingefügt
+  function setze(xml, ref, val) {
+    const re = new RegExp('<c r="' + ref + '"((?:\\s+[a-zA-Z:]+="[^"]*")*)\\s*(?:/>|>([\\s\\S]*?)</c>)');
+    const m = xml.match(re);
+    if (m) {
+      if (m[2] && /<f[ >\/]/.test(m[2])) return xml;   // Formelzellen nie überschreiben
+      const s = (m[1].match(/\ss="(\d+)"/) || [])[1];
+      return xml.slice(0, m.index) + zellXml(ref, s, val) + xml.slice(m.index + m[0].length);
+    }
+    if (val === null || val === undefined || val === '') return xml;
+    const [, col, row] = ref.match(/^([A-Z]+)(\d+)$/), neu = zellXml(ref, null, val);
+    const rr = new RegExp('<row r="' + row + '"([^>]*?)(?:/>|>([\\s\\S]*?)</row>)'), rm = xml.match(rr);
+    if (rm) {
+      const inhalt = rm[2] || '', zellen = [...inhalt.matchAll(/<c r="([A-Z]+)\d+"/g)];
+      const nach = zellen.find(z => colNr(z[1]) > colNr(col));
+      const neuInhalt = nach ? inhalt.slice(0, nach.index) + neu + inhalt.slice(nach.index) : inhalt + neu;
+      return xml.slice(0, rm.index) + `<row r="${row}"${rm[1]}>${neuInhalt}</row>` + xml.slice(rm.index + rm[0].length);
+    }
+    const zeilen = [...xml.matchAll(/<row r="(\d+)"/g)], danach = zeilen.find(z => +z[1] > +row);
+    const neueZeile = `<row r="${row}">${neu}</row>`;
+    if (danach) return xml.slice(0, danach.index) + neueZeile + xml.slice(danach.index);
+    return xml.replace('</sheetData>', neueZeile + '</sheetData>').replace('<sheetData/>', `<sheetData>${neueZeile}</sheetData>`);
+  }
+  function bildAnker(id, rid, col, row, w, h) {
+    const E = 9525;
+    return `<xdr:oneCellAnchor><xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>${6 * E}</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>${3 * E}</xdr:rowOff></xdr:from><xdr:ext cx="${w * E}" cy="${h * E}"/>` +
+      `<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${id}" name="Unterschrift ${id}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>` +
+      `<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${w * E}" cy="${h * E}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>`;
+  }
+
+  async function excelFuellen(JSZip, vorlage, r, SD, sig) {
+    const zip = await JSZip.loadAsync(vorlage);
+    const S1 = 'xl/worksheets/sheet1.xml';
+    let x = await zip.file(S1).async('string');
+    const set = (ref, v) => { x = setze(x, ref, v) };
+    set('B8', serial(r.datum));
+    set('B11', r.baustelle || null); set('B12', r.bauteil || null); set('B14', zahlOderText(r.baunr));
+    set('E14', r.temp === '' || r.temp == null ? null : n(r.temp)); set('E15', r.wetter || null);
     const aps = r.aps.slice(0, 7);
-    aps.forEach((a, i) => { set(AP_COLS[i] + '1', a.text); set(AP_COLS[i] + '13', zahlOderText(a.nr)) });
+    aps.forEach((a, i) => { set(AP_COLS[i] + '1', a.text || null); set(AP_COLS[i] + '13', zahlOderText(a.nr)) });
     const apCol = id => { const i = aps.findIndex(a => a.id === id); return i < 0 ? null : AP_COLS[i] };
     r.personal.slice(0, 14).forEach((p, i) => {
-      const row = 17 + i; set('B' + row, p.name); set('A' + row, p.nr || null); set('F' + row, p.zus || null);
+      const row = 17 + i; set('B' + row, p.name); set('F' + row, p.zus || null);
       if (!p.zus) Object.entries(p.h || {}).forEach(([id, v]) => { const c = apCol(id); if (c && n(v)) set(c + row, n(v)) });
     });
     r.geraete.slice(0, 13).forEach((g, i) => {
-      const row = 32 + i; set('C' + row, g.name); set('A' + row, g.nr || null); set('B' + row, zahlOderText(g.ks));
+      const row = 32 + i; set('C' + row, g.name);
       Object.entries(g.h || {}).forEach(([id, v]) => { const c = apCol(id); if (c && n(v)) set(c + row, n(v)) });
     });
-    // Baustoffe wie in der Vorlage: ---Lieferant---, Material [Einheit], darunter Lieferschein + Menge
-    const L = []; const multi = new Set(r.material.map(m => m.ap)).size > 1; let la = null, ll = null, lm = null;
-    const pos = (arr, k) => { const i = arr.indexOf(k); return i < 0 ? 999 : i }, LL = [...new Set(r.material.map(m => m.lief))], MM = [...new Set(r.material.map(m => m.mat))];
-    r.material.map((m, i) => [m, i]).sort((a, b) => (r.aps.findIndex(x => x.id === a[0].ap) - r.aps.findIndex(x => x.id === b[0].ap)) || (pos(LL, a[0].lief) - pos(LL, b[0].lief)) || (pos(MM, a[0].mat) - pos(MM, b[0].mat)) || (a[1] - b[1])).map(x => x[0]).forEach(m => {
-      if (multi && m.ap !== la) { const a = r.aps.find(x => x.id === m.ap); L.push(['AP ' + (a && a.nr || '?'), null]); la = m.ap; ll = lm = null }
-      if (m.lief !== ll) { L.push(['---' + m.lief + '---', null]); ll = m.lief; lm = null }
-      if (m.mat !== lm) { L.push([m.mat + (m.einh ? ' [' + m.einh + ']' : ''), null]); lm = m.mat }
-      L.push([m.ls || '', n(m.menge)]);
+    // Baustoffe gesammelt: je AP → Lieferant → Material, darunter Lieferschein + Menge
+    const L = [], pos = (arr, k) => { const i = arr.indexOf(k); return i < 0 ? 999 : i }, LL = [...new Set(r.material.map(m => m.lief))], MM = [...new Set(r.material.map(m => m.mat))];
+    const multi = new Set(r.material.map(m => m.ap)).size > 1; let la = null, ll = null, lm = null;
+    r.material.map((m, i) => [m, i]).sort((a, b) => (r.aps.findIndex(q => q.id === a[0].ap) - r.aps.findIndex(q => q.id === b[0].ap)) || (pos(LL, a[0].lief) - pos(LL, b[0].lief)) || (pos(MM, a[0].mat) - pos(MM, b[0].mat)) || (a[1] - b[1])).map(q => q[0]).forEach(m => {
+      if (multi && m.ap !== la) { const a = r.aps.find(q => q.id === m.ap); L.push(['AP ' + (a && a.nr || '?'), null]); la = m.ap; ll = lm = null }
+      if (m.lief !== ll) { L.push(['---' + (m.lief || '?') + '---', null]); ll = m.lief; lm = null }
+      if (m.mat !== lm) { L.push([(m.mat || '?') + (m.einh ? ' [' + m.einh + ']' : ''), null]); lm = m.mat }
+      L.push([(m.ls || '') + (m.lsdatum && m.lsdatum !== r.datum ? ' (' + m.lsdatum.split('-').reverse().join('.').slice(0, 6) + ')' : ''), n(m.menge)]);
     });
     r.geraete.filter(g => g.firma).forEach(g => L.push([g.firma, null]));
-    L.slice(0, 42).forEach(([y1, z1], i) => { set('Y' + (3 + i), y1); set('Z' + (3 + i), z1) });
-    set('J46', r.bem);
+    L.slice(0, 42).forEach(([a, b], i) => { set('Y' + (3 + i), a); set('Z' + (3 + i), b) });
+    set('J46', r.bem || null);
     set('B47', zeit(r.beginn)); set('C47', zeit(r.ende)); set('D47', zeit(r.pause));
-    // Bautagebuch-Teil (Rest kommt per Formel aus dem Tagesbericht)
-    set('J55', r.bauherr); set('J64', r.wasser);
-    umbrechen(r.vork, 95).slice(0, 10).forEach((l, i) => set('J' + (85 + i), l));
-    // Unterschrift des Poliers bei „Ausgestellt“ (Tagesbericht und Bautagebuch)
-    if (sig) { const id = wb.addImage({ base64: sig, extension: 'png' }); ws.addImage(id, { tl: { col: 3.1, row: 47.05 }, ext: { width: 150, height: 38 } }); ws.addImage(id, { tl: { col: 3.1, row: 97.05 }, ext: { width: 150, height: 38 } }) }
-    // Auswahlliste Mitarbeiter aus den Stammdaten des Handys (nicht in der Vorlage gespeichert)
-    const dd = wb.getWorksheet('DropDown');
-    if (dd && SD) SD.ma.slice(0, 114).forEach((m, i) => { dd.getCell('A' + (2 + i)).value = m[0]; dd.getCell('B' + (2 + i)).value = zahlOderText(m[1]) });
-    // Blatt „Lohn“: eine Zeile je Mitarbeiter und AP (ersetzt die CSV)
-    const lo = wb.addWorksheet('Lohn');
-    lo.columns = [{ header: 'Datum', width: 11 }, { header: 'Baustellen-Nr.', width: 13 }, { header: 'Pers.-Nr.', width: 10 }, { header: 'Name', width: 26 }, { header: 'AP', width: 7 }, { header: 'Stunden', width: 9 }, { header: 'Kürzel', width: 8 }, { header: 'Art', width: 9 }];
-    const dt = new Date(Date.UTC(y, mo - 1, d)), apNr = id => (r.aps.find(a => a.id === id) || {}).nr || '';
+    set('J55', r.bauherr || null); set('J64', r.wasser || null);
+    umbrechen(r.vork, 72).slice(0, 10).forEach((l, i) => set('J' + (85 + i), l));
+    zip.file(S1, x);
+
+    // Mitarbeiterliste für Auswahl und Pers.-Nr. (aus den Stammdaten des Handys)
+    const liste = ((SD && SD.ma) || []).map(m => [m[0], m[1]]);
+    r.personal.forEach(p => { if (p.name && !liste.some(m => m[0] === p.name)) liste.push([p.name, p.nr || '']) });
+    if (liste.length) {
+      let d = await zip.file('xl/worksheets/sheet2.xml').async('string');
+      liste.slice(0, 114).forEach((m, i) => { d = setze(d, 'A' + (2 + i), m[0]); d = setze(d, 'B' + (2 + i), m[1] ? String(m[1]) : null) });
+      zip.file('xl/worksheets/sheet2.xml', d);
+    }
+    // Unterschrift des Poliers (Tagesbericht und Bautagebuch)
+    if (sig) {
+      zip.file('xl/media/image2.png', sig.split(',')[1], { base64: true });
+      let rel = await zip.file('xl/drawings/_rels/drawing1.xml.rels').async('string');
+      rel = rel.replace('</Relationships>', '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image2.png"/></Relationships>');
+      zip.file('xl/drawings/_rels/drawing1.xml.rels', rel);
+      let dr = await zip.file('xl/drawings/drawing1.xml').async('string');
+      dr = dr.replace('<!--SIG-->', bildAnker(10, 'rId2', 2, 47, 150, 38) + bildAnker(11, 'rId2', 2, 97, 150, 38));
+      zip.file('xl/drawings/drawing1.xml', dr);
+    }
+    // Blatt „Lohn“: eine Zeile je Mitarbeiter und AP, dazu Gerätestunden
+    const apNr = id => (r.aps.find(a => a.id === id) || {}).nr || '', dt = r.datum.split('-').reverse().join('.');
+    const zeilen = [['Datum', 'Baustellen-Nr.', 'Pers.-Nr.', 'Name', 'AP', 'Stunden', 'Kürzel', 'Art']];
     r.personal.forEach(p => {
-      if (p.zus) lo.addRow([dt, zahlOderText(r.baunr), p.nr || '', p.name, '', 0, p.zus, 'Personal']);
-      else Object.entries(p.h || {}).filter(([, v]) => n(v)).forEach(([id, v]) => lo.addRow([dt, zahlOderText(r.baunr), p.nr || '', p.name, zahlOderText(apNr(id)), n(v), '', 'Personal']));
+      if (p.zus) zeilen.push([dt, r.baunr, p.nr || '', p.name, '', 0, p.zus, 'Personal']);
+      else Object.entries(p.h || {}).filter(([, v]) => n(v)).forEach(([id, v]) => zeilen.push([dt, r.baunr, p.nr || '', p.name, apNr(id), n(v), '', 'Personal']));
     });
-    r.geraete.forEach(g => Object.entries(g.h || {}).filter(([, v]) => n(v)).forEach(([id, v]) => lo.addRow([dt, zahlOderText(r.baunr), g.ks || '', g.name + (g.firma ? ' (' + g.firma + ')' : ''), zahlOderText(apNr(id)), n(v), '', 'Gerät'])));
-    lo.getRow(1).font = { bold: true }; lo.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
-    lo.getColumn(1).numFmt = 'dd.mm.yyyy'; lo.getColumn(6).numFmt = '0.00';
-    lo.autoFilter = { from: 'A1', to: 'H1' };
-    if (r.personal.length > 14 || r.geraete.length > 13) lo.addRow([]), lo.addRow(['Hinweis: Mehr als 14 Personen bzw. 13 Geräte – im Formular stehen nur die ersten, hier stehen alle.']);
-    // Layout wie das PDF der App: Logo statt Textzeilen, Adresse in einer Zeile, orange Linie unter dem Titel, Dauer in Dezimalstunden
-    const ADR = 'Neue Welt 50 · 88471 Laupheim · Tel. (073 92) 9703-0';
-    ['B3', 'B4', 'B5', 'B53', 'B54', 'B55'].forEach(a => set(a, null)); set('B6', ADR); set('B56', ADR);
-    if (logo) { const lid = wb.addImage({ base64: logo, extension: 'png' }); [2, 52].forEach(row => ws.addImage(lid, { tl: { col: 1.15, row: row + 0.08 }, ext: { width: 160, height: 45 } })) }
-    // Stil immer als Kopie setzen – ExcelJS teilt Stil-Objekte zwischen Zellen
-    const stil = (adr, f) => { const c = ws.getCell(adr); c.style = f(JSON.parse(JSON.stringify(c.style || {}))) };
-    ['B', 'C', 'D', 'E', 'F', 'G', 'H'].forEach(c => [2, 52].forEach(row => stil(c + row, s => Object.assign(s, { border: Object.assign({}, s.border, { bottom: { style: 'medium', color: { argb: 'FFED7102' } } }) }))));
-    ['B6', 'B56'].forEach(a => stil(a, s => Object.assign(s, { font: Object.assign({}, s.font, { size: 6.5 }) })));
-    ws.getCell('G47').value = { formula: '(C47-B47-D47)*24' };
-    ['G47', 'G97'].forEach(a => stil(a, s => Object.assign(s, { numFmt: '0.00 "h"' })));
-    // Druck: A4 hoch, 12 mm Rand, Tagesbericht und Bautagebuch je eine Seite
-    ws.getRow(50).addPageBreak();
-    ws.pageSetup = Object.assign({}, ws.pageSetup, { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 2, printArea: 'B1:Z98', horizontalCentered: true,
-      margins: { left: 0.47, right: 0.47, top: 0.47, bottom: 0.47, header: 0, footer: 0 } });
-    ws.views = [{ showGridLines: false, zoomScale: 100 }];
-    ws.name = ((r.baunr || 'TB') + ' ' + r.datum.split('-').reverse().join('.')).slice(0, 31);
-    wb.calcProperties = Object.assign(wb.calcProperties || {}, { fullCalcOnLoad: true });
-    return wb.xlsx.writeBuffer();
+    r.geraete.forEach(g => Object.entries(g.h || {}).filter(([, v]) => n(v)).forEach(([id, v]) => zeilen.push([dt, r.baunr, g.ks || '', g.name + (g.firma ? ' (' + g.firma + ')' : ''), apNr(id), n(v), '', 'Gerät'])));
+    const COL = 'ABCDEFGH';
+    const sd = zeilen.map((z, i) => `<row r="${i + 1}">` + z.map((v, j) => zellXml(COL[j] + (i + 1), null, typeof v === 'number' ? v : (v === '' ? null : String(v)))).join('') + '</row>').join('');
+    zip.file('xl/worksheets/sheet9.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><cols><col min="1" max="2" width="13" customWidth="1"/><col min="3" max="3" width="10" customWidth="1"/><col min="4" max="4" width="30" customWidth="1"/><col min="5" max="8" width="9" customWidth="1"/></cols><sheetData>' + sd + '</sheetData></worksheet>');
+    let wb = await zip.file('xl/workbook.xml').async('string');
+    const sid = Math.max(...[...wb.matchAll(/sheetId="(\d+)"/g)].map(q => +q[1])) + 1;
+    wb = wb.replace('</sheets>', `<sheet name="Lohn" sheetId="${sid}" r:id="rIdLohn"/></sheets>`);
+    zip.file('xl/workbook.xml', wb);
+    let wr = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+    wr = wr.replace('</Relationships>', '<Relationship Id="rIdLohn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet9.xml"/></Relationships>');
+    zip.file('xl/_rels/workbook.xml.rels', wr);
+    let ct = await zip.file('[Content_Types].xml').async('string');
+    ct = ct.replace('</Types>', '<Override PartName="/xl/worksheets/sheet9.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('[Content_Types].xml', ct);
+    return zip.generateAsync({ type: typeof window !== 'undefined' ? 'arraybuffer' : 'nodebuffer', compression: 'DEFLATE' });
   }
   root.excelFuellen = excelFuellen;
-  if (typeof module !== 'undefined') module.exports = { excelFuellen };
+  if (typeof module !== 'undefined') module.exports = { excelFuellen, setze };
 })(typeof window !== 'undefined' ? window : globalThis);

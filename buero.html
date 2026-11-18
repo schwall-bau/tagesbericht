@@ -29,10 +29,10 @@
   </div>
   <div class="card" id="out" hidden></div>
 </main>
-<script src="vendor/exceljs.min.js"></script>
+<script src="vendor/jszip.min.js"></script>
 <script src="excel.js"></script>
 <script>
-let VORLAGE = null, LOGO = null;
+let VORLAGE = null;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // Bericht aus der DATEN-Datei wiederherstellen (neue Dateien enthalten ihn komplett, ältere werden umgebaut)
 function berichtAus(d) {
@@ -49,13 +49,12 @@ function berichtAus(d) {
 async function verarbeiten(files) {
   const out = document.getElementById('out'); out.hidden = false; out.innerHTML = '<b>Ergebnis</b>';
   if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
-  if (!LOGO) LOGO = await new Promise(async res => { const bl = await (await fetch('icons/logo-dark.png')).blob(); const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(bl) });
   for (const f of files) {
     const row = document.createElement('div'); row.className = 'it'; row.innerHTML = `<span>${esc(f.name)}</span><span>wird erzeugt …</span>`; out.appendChild(row);
     try {
       const d = JSON.parse(await f.text()); if (d.format !== 'schwall-tagesbericht') throw new Error('keine DATEN-Datei der Tagesbericht-App');
       const r = berichtAus(d);
-      const buf = await excelFuellen(ExcelJS, VORLAGE.slice(0), r, null, r.sig || null, LOGO);
+      const buf = await excelFuellen(JSZip, VORLAGE.slice(0), r, null, r.sig || null);
       const name = `${r.baunr || 'ohneNr'}-TB-BTB-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
       const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();

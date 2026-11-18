@@ -167,3 +167,13 @@ code{background:#f1f1f1;padding:1px 4px;border-radius:4px}
 header small{color:#1e1e1c;opacity:.85;font-weight:600}
 header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 .newp{display:inline-block;background:#fde3cc;color:#a24c00;border-radius:4px;padding:0 5px;font-size:11px;font-weight:700;margin-left:4px}
+
+.lssum .lsbig{font-size:28px;font-weight:800;color:var(--orange);line-height:1.1}
+.lsmat{display:flex;justify-content:space-between;gap:8px;font-size:14px;padding:6px 0;border-top:1px dashed var(--line)}
+.lstab{width:100%;border-collapse:collapse;font-size:14px}
+.lstab th{background:#f2f2f2;text-align:left;padding:7px 8px;font-size:12px;color:var(--mut)}
+.lstab td{padding:8px;border-top:1px solid #eee;vertical-align:top}
+.lstab .r{text-align:right;white-space:nowrap}
+.lstab tr[data-lsedit]{cursor:pointer}
+.lstab tr.lsauto td:first-child{box-shadow:inset 4px 0 0 #e0b400}
+.lstab tr.lsok{background:#f1f8f1}

@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.10.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -88,6 +88,7 @@ async function importStammdaten(file) {
 async function init() {
   try {
     SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
+    LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
     HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
   } catch (e) { console.error(e) }
@@ -123,9 +124,9 @@ function render() {
     $('#foot').style.display = 'flex';
     $('#foot').innerHTML = (S.step > 0 ? `<button class="btn ghost" data-act="prev">‹ Zurück</button>` : '') + (S.step < 5 ? `<button class="btn orange" data-act="next">Weiter ›</button>` : `<button class="btn orange" data-act="prepare">PDF erstellen & senden</button>`);
   } else {
-    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte' }[S.view] || 'Tagesbericht';
+    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte', lieferscheine: '🧾 Lieferschein-Liste' }[S.view] || 'Tagesbericht';
     if (S.view !== 'home' && S.view !== 'setup') { hb.style.display = ''; hb.textContent = '‹ Start'; hb.onclick = () => { S.view = 'home'; render() } }
-    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf })[S.view]();
+    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf, lieferscheine: vLieferscheine })[S.view]();
   }
   fitA4(); initSig();
 }
@@ -141,6 +142,7 @@ function vHome() {
       <div class="row" style="margin-top:8px"><button class="btn ghost" data-act="neu">Neuer Bericht</button><button class="btn danger" data-act="verwerfen">Entwurf löschen</button></div>`
       : `<button class="btn orange full big" data-act="neu">＋ Neuer Tagesbericht</button>`}
     <button class="btn full big" style="margin-top:8px;background:#2b2b2b;flex-direction:column" data-act="telefon">📞 Bericht per Gespräch<br><small style="font-weight:400">Die App fragt, du antwortest mit Sprache</small></button>
+    ${(() => { const h = LSL.filter(e => e.datum === today()); return `<button class="btn ghost full" style="margin-top:8px;flex-direction:column" data-act="lsliste">🧾 Lieferschein-Liste<small style="font-weight:400">${h.length ? 'heute ' + h.length + ' LS · ' + mengenText(h) : 'laufend scannen, Tonnage im Blick'}</small></button>` })()}
     ${HIST.length ? `<button class="btn ghost full" style="margin-top:8px" data-act="vorlage">↺ Wie letzter Bericht (${esc(HIST[0].baunr)} ${dateDe(HIST[0].datum)})</button>` : ''}
     ${HIST.length > 1 ? `<button class="btn ghost full" style="margin-top:8px;border-style:dashed" data-act="vorlagewahl">📚 Älteren Bericht als Vorlage wählen …</button>` : ''}
   </div>
@@ -238,6 +240,7 @@ ${r.material.map(m => `<div class="card"><div class="prow"><b>${esc(m.mat) || 'M
  <div style="margin-top:10px"><span class="btn ghost small fotobtn">📷 ${m.fotos.length ? 'Weiteres Foto' : 'Foto + automatisch erkennen'}<input type="file" accept="image/*" capture="environment" data-foto="${m.id}"></span></div>
  <div class="thumbs">${m.fotos.map((f, i) => `<img src="${f}" data-delfoto="${m.id}|${i}" title="Antippen zum Löschen">`).join('')}</div>
 </div>`).join('')}
+${LSL.some(e => lsFrei(e) && !r.material.some(m => m.lsid === e.id)) ? `<button class="btn ghost full" style="margin-bottom:8px;border-color:var(--orange)" data-act="lsimport">📋 Aus Lieferschein-Liste übernehmen (${LSL.filter(e => lsFrei(e) && !r.material.some(m => m.lsid === e.id)).length} offen)</button>` : ''}
 <div class="row"><button class="btn" data-act="addmat">＋ Von Hand</button>${r.material.length ? `<button class="btn ghost" data-act="dupmat">＋ Gleiches Material</button>` : ''}</div>`;
 }
 function vAbschluss() {
@@ -528,8 +531,8 @@ function parseLieferschein(text) {
   return out;
 }
 // Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag (bei mehreren Positionen mehrere Einträge)
-async function scanLieferscheine(files, zielId) {
-  const r = S.r; let erkannt = 0;
+async function scanLieferscheine(files, zielId, ziel) {
+  const r = ziel || S.r; let erkannt = 0;
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     overlay(`<div class="spin"></div><b>Lieferschein ${files.length > 1 ? (i + 1) + ' von ' + files.length + ' ' : ''}wird gelesen …</b><p class="small" id="ocrp">Texterkennung wird gestartet${ocrWorker ? '' : ' (beim ersten Mal ca. 10 Sek.)'}</p><p class="small">Gedrehte Fotos werden automatisch erkannt.</p>`);
@@ -880,6 +883,79 @@ function telRender() {
   const lg = $('#tellog'); if (lg) lg.lastElementChild && lg.lastElementChild.scrollIntoView({ block: 'end' });
 }
 
+
+// ---------------------------------------------------------------- Lieferschein-Liste (eigener Bereich, unabhängig vom Tagesbericht)
+// Lieferscheine laufend scannen → fortlaufende Tabelle je Baustelle und Tag mit Tonnage; später in jeden Tagesbericht übernehmbar
+let LSL = [];
+const LSV = { baunr: '', datum: today(), offen: null };
+const lsSpeichern = () => DB.set('lsliste', LSL).catch(() => toast('Speichern fehlgeschlagen – Speicher voll?'));
+const lsTag = (b, d) => LSL.filter(e => e.baunr === b && e.datum === d).sort((x, y) => x.zeit - y.zeit);
+const EINH_TXT = { to: 't', m3: 'm³', Stk: 'Stk', Std: 'Std' };
+function mengenText(list) { const s = {}; list.forEach(e => { const u = e.einh || 'to'; s[u] = (s[u] || 0) + num(e.menge) }); return Object.entries(s).map(([u, v]) => `${fq(v)} ${EINH_TXT[u] || u}`).join(' + ') || '0,00 t' }
+function proMaterial(list) { const g = new Map(); list.forEach(e => { const k = (e.lief || '?') + ' · ' + (e.mat || 'ohne Material'); if (!g.has(k)) g.set(k, []); g.get(k).push(e) }); return [...g] }
+const lsFrei = e => !e.uebernommen;
+function vLieferscheine() {
+  const bs = [...new Map([...HIST, ...LSL].filter(x => x.baunr).map(x => [x.baunr, x.baustelle || ''])).entries()];
+  const tag = lsTag(LSV.baunr, LSV.datum), alle = LSL.filter(e => e.baunr === LSV.baunr);
+  const tage = [...new Set(alle.map(e => e.datum))].sort().reverse();
+  return `<div class="card">
+   <div class="grid2"><div><label style="margin-top:0">Baustellen-Nr.</label><input id="ls_bnr" list="ls_bs" inputmode="numeric" value="${esc(LSV.baunr)}" placeholder="26025"></div>
+   <div><label style="margin-top:0">Datum</label><input id="ls_dat" type="date" value="${LSV.datum}"></div></div>
+   <datalist id="ls_bs">${bs.map(([n, o]) => `<option value="${esc(n)}">${esc(o)}</option>`).join('')}</datalist></div>
+  <div class="card" style="background:#fff4ea;border:1.5px solid #f6c89a"><b>📷 Lieferschein scannen</b><p class="hint" style="margin:4px 0 8px">Jeden Lieferschein bei Ankunft fotografieren – die Werte landen sofort in der Tabelle.</p>
+   <div class="row"><span class="btn orange fotobtn">📷 Kamera<input type="file" accept="image/*" capture="environment" data-lsscan="1"></span><span class="btn ghost fotobtn">🖼️ Mehrere<input type="file" accept="image/*" multiple data-lsscan="1"></span></div>
+   <button class="btn ghost small full" style="margin-top:8px" data-act="lshand">＋ Von Hand eintragen</button></div>
+  <div class="card lssum"><div class="prow"><div><div class="small">${wtag(LSV.datum)}, ${dateDe(LSV.datum)}${LSV.baunr ? ' · Baustelle ' + esc(LSV.baunr) : ''}</div><div class="lsbig">${mengenText(tag)}</div><div class="small">${tag.length} Lieferschein(e)</div></div>
+   <div style="text-align:right"><div class="small">Baustelle gesamt</div><b>${mengenText(alle)}</b><div class="small">${alle.length} LS · ${tage.length} Tag(e)</div></div></div>
+   ${proMaterial(tag).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}</span><b>${l.length} × · ${mengenText(l)}</b></div>`).join('')}</div>
+  <div class="card" style="padding:0;overflow:hidden"><table class="lstab"><tr><th>#</th><th>LS-Nr.</th><th>Lieferant / Material</th><th class="r">Menge</th></tr>
+   ${tag.map((e, i) => `<tr data-lsedit="${e.id}" class="${e.uebernommen ? 'lsok' : ''} ${e.ocr && e.ocr.auto && e.ocr.auto.length ? 'lsauto' : ''}"><td>${i + 1}</td><td><b>${esc(e.ls) || '–'}</b><div class="small">${new Date(e.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</div></td><td>${esc(e.lief) || '?'}<div class="small">${esc(e.mat) || '<span style="color:var(--rot)">Material fehlt</span>'}${e.uebernommen ? ' · ✓ im Bericht ' + dShort(e.uebernommen.datum, '.') : ''}</div></td><td class="r"><b>${f2(e.menge) || '–'}</b> ${EINH_TXT[e.einh] || e.einh || ''}</td></tr>
+   ${LSV.offen === e.id ? `<tr><td colspan="4" style="background:#fafafa">${lsEditor(e)}</td></tr>` : ''}`).join('') || `<tr><td colspan="4"><div class="hint" style="padding:10px;text-align:center">Noch keine Lieferscheine für diesen Tag.</div></td></tr>`}
+  </table></div>
+  ${tage.length > 1 || (tage.length && tage[0] !== LSV.datum) ? `<div class="card"><b>Andere Tage dieser Baustelle</b><div class="lst">${tage.filter(d => d !== LSV.datum).map(d => { const l = lsTag(LSV.baunr, d); return `<div class="it" data-lsday="${d}" style="cursor:pointer"><span>${wtag(d)}, ${dateDe(d)}</span><span class="small">${l.length} LS · ${mengenText(l)}${l.every(e => e.uebernommen) ? ' · ✓' : ''}</span></div>` }).join('')}</div></div>` : ''}
+  ${tag.some(lsFrei) ? `<button class="btn orange full" data-act="lsbericht">➜ ${tag.filter(lsFrei).length} Lieferscheine in den Tagesbericht übernehmen</button>` : ''}
+  <p class="small" style="text-align:center">Die Liste ist unabhängig vom Tagesbericht. Übernommene Lieferscheine sind mit ✓ markiert.</p>`;
+}
+function lsEditor(e) {
+  return `<div class="grid2"><div><label>Lieferschein-Nr.</label><input data-lsf="${e.id}|ls" value="${esc(e.ls)}"></div><div><label>Menge ${e.einh ? '[' + esc(EINH_TXT[e.einh] || e.einh) + ']' : ''}</label><input data-lsf="${e.id}|menge" inputmode="decimal" value="${e.menge !== '' && e.menge != null ? fmt(num(e.menge)) : ''}"></div></div>
+  <div class="grid2"><div><label>Lieferant</label>${pickBtn('lslief|' + e.id, e.lief || 'wählen …')}</div><div><label>Material</label>${pickBtn('lsmat|' + e.id, e.mat || 'wählen …')}</div></div>
+  ${e.ocr && e.ocr.chips ? `<div class="chips" style="margin-top:8px">${e.ocr.chips.map((c, i) => `<button class="chip ${e.mat === c[1] ? 'on' : ''}" data-lschip="${e.id}|${i}">${esc(c[0])}</button>`).join('')}</div>` : ''}
+  <div class="thumbs">${(e.fotos || []).map(f => `<img src="${f}">`).join('')}</div>
+  ${e.ocr && e.ocr.profil ? `<div class="hint">🏷️ ${esc(e.ocr.profil)}</div>` : ''}
+  <div class="row" style="margin-top:8px"><button class="btn small ghost" data-lsedit="${e.id}">Fertig</button><button class="btn small danger" data-lsdel="${e.id}">Löschen</button></div>`;
+}
+async function lsScan(files) {
+  if (!LSV.baunr) { toast('Bitte zuerst die Baustellen-Nr. eintragen'); return }
+  const tmp = { datum: LSV.datum, aps: [{ id: '_' }], material: lsTag(LSV.baunr, LSV.datum).map(e => Object.assign({}, e)) };
+  const vorher = new Set(tmp.material.map(m => m.id));
+  await scanLieferscheine(files, null, tmp);
+  tmp.material.filter(m => !vorher.has(m.id)).forEach(m => LSL.push({ id: m.id, baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: m.lief, mat: m.mat, matnr: m.matnr, einh: m.einh || 'to', ls: m.ls, menge: m.menge, fotos: m.fotos, ocr: m.ocr ? { auto: m.ocr.auto, profil: m.ocr.profil, chips: m.ocr.chips, kopf: m.ocr.kopf } : null }));
+  await lsSpeichern(); render();
+}
+// In den Tagesbericht übernehmen (ausgewählter Tag, nur noch nicht übernommene)
+function lsInBericht(r, eintraege, apId) {
+  let n = 0; const da = new Set(r.material.map(m => m.lsid));
+  eintraege.forEach(e => { if (da.has(e.id) || e.uebernommen) return; r.material.push({ id: uid(), ap: apId || r.aps[0].id, lief: e.lief, mat: e.mat, matnr: e.matnr || '', einh: e.einh || '', ls: e.ls, menge: e.menge, fotos: (e.fotos || []).slice(), lsid: e.id, lsdatum: e.datum }); n++ });
+  return n;
+}
+function lsPicker(r) {
+  const gruppen = [...new Map(LSL.map(e => [e.baunr + '|' + e.datum, 1])).keys()].map(k => { const [b, d] = k.split('|'); return { b, d, l: lsTag(b, d) } })
+    .sort((x, y) => ((y.b === r.baunr) - (x.b === r.baunr)) || y.d.localeCompare(x.d));
+  let apId = r.aps[0].id;
+  const el = document.createElement('div'); el.className = 'sheet';
+  const draw = () => { el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">Lieferscheine übernehmen</b><button class="btn small" data-close>✕</button></div>
+    ${r.aps.length > 1 ? `<div class="small" style="margin-top:6px">Zuordnen zu:</div><div class="chips">${r.aps.map(a => `<button class="chip ${a.id === apId ? 'on' : ''}" data-lsap="${a.id}">AP ${esc(a.nr) || '?'}</button>`).join('')}</div>` : ''}</div>
+    <div class="list">${gruppen.map(g => { const frei = g.l.filter(e => lsFrei(e) && !r.material.some(m => m.lsid === e.id)); return `<div class="it" ${frei.length ? `data-lsg="${g.b}|${g.d}"` : ''} style="${frei.length ? '' : 'opacity:.5'}"><span><b>${wtag(g.d)}, ${dateDe(g.d)}</b> · ${esc(g.b)}<br><small style="white-space:normal">${g.l.length} LS · ${mengenText(g.l)} · ${frei.length ? frei.length + ' offen' : 'alle übernommen'}</small></span>${g.d === r.datum && g.b === r.baunr ? '<small>heute</small>' : ''}</div>` }).join('') || '<div class="hint" style="padding:14px">Keine Lieferscheine in der Liste.</div>'}</div></div>` };
+  draw(); document.body.appendChild(el);
+  el.addEventListener('click', e => {
+    if (e.target === el || e.target.closest('[data-close]')) { el.remove(); return }
+    const ap = e.target.closest('[data-lsap]'); if (ap) { apId = ap.dataset.lsap; draw(); return }
+    const g = e.target.closest('[data-lsg]'); if (!g) return; const [b, d] = g.dataset.lsg.split('|');
+    const n = lsInBericht(r, lsTag(b, d), apId); el.remove(); saveDraft(); render();
+    toast(`${n} Lieferschein(e) vom ${dateDe(d)} übernommen${d !== r.datum ? ' – im Bericht mit Datum gekennzeichnet' : ''}`, 4000);
+  });
+}
+
 // ---------------------------------------------------------------- Prüfregeln
 function pruefe(r) {
   const o = [], d = dauer(r);
@@ -942,7 +1018,7 @@ function matLines(r) {
     if (multi && m.ap !== la) { const a = aps.find(a => a.id === m.ap); L.push({ t: 'AP ' + (a && a.nr || '?'), cls: 'g' }); la = m.ap; ll = lm = null }
     if (m.lief !== ll) { L.push({ t: '---' + m.lief + '---' }); ll = m.lief; lm = null }
     if (m.mat !== lm) { L.push({ t: m.mat + (m.einh ? ' [' + m.einh + ']' : '') }); lm = m.mat }
-    L.push({ ls: m.ls, mg: fq(m.menge) + (m.einh ? ' ' + m.einh : '') });
+    L.push({ ls: m.ls + (m.lsdatum && m.lsdatum !== r.datum ? ' (' + dShort(m.lsdatum, '.').slice(0, 6) + ')' : ''), mg: fq(m.menge) + (m.einh ? ' ' + m.einh : '') });
   });
   r.geraete.filter(g => g.firma).forEach(g => L.push({ t: g.firma + ' (' + g.name.replace(/\s*\/\s*Miet/i, '') + ')' }));
   return L;
@@ -1102,11 +1178,10 @@ async function pdfErzeugen(r, art) {
   }
   return pdf.output('blob');
 }
-let VORLAGE = null, LOGO_DATA = null;
+let VORLAGE = null;
 async function excelErzeugen(r) {   // füllt die Original-Excel-Vorlage (Tagesbericht + Bautagebuch + Blatt „Lohn“)
   if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
-  if (!LOGO_DATA) LOGO_DATA = await new Promise(async res => { const b = await (await fetch('icons/logo-dark.png')).blob(); const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b) });
-  return new Blob([await excelFuellen(ExcelJS, VORLAGE.slice(0), r, SD, r.sig || null, LOGO_DATA)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  return new Blob([await excelFuellen(JSZip, VORLAGE.slice(0), r, SD, r.sig || null)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 async function dateienErzeugen(r) {
   const base = `${r.baunr || 'ohneNr'}-%-${yymmdd(r.datum)}`, d = berichtDaten(r);
@@ -1123,7 +1198,7 @@ const teilbar = files => !!(navigator.canShare && navigator.canShare({ files }))
 // manche Android-Handys dürfen Excel-Dateien nicht über „Teilen“ weitergeben → dann ohne Excel teilen (Büro erzeugt sie aus der DATEN-Datei)
 function teilDateien(files) { if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
 const betreff = r => `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
-const mailText = r => `Betreff: ${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
+const mailText = r => `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
 // ---------------------------------------------------------------- Versand
 function overlay(html) { let o = $('#ov'); if (!o) { o = document.createElement('div'); o.id = 'ov'; o.className = 'overlay'; document.body.appendChild(o) } o.innerHTML = `<div class="box2">${html}</div>`; return o }
@@ -1183,6 +1258,7 @@ async function sendQueue(silent) {
 const kurz = r => ({ id: r.id, datum: r.datum, baunr: r.baunr, baustelle: r.baustelle, aps: r.aps.map(a => ({ nr: a.nr, text: a.text })) });
 async function abgeschlossen(weg, wartet) {
   const r = S.prepared.r; try { lernen(r) } catch (e) { }
+  const lsIds = new Set(r.material.map(m => m.lsid).filter(Boolean)); if (lsIds.size) { LSL.forEach(e => { if (lsIds.has(e.id)) e.uebernommen = { datum: r.datum, baunr: r.baunr, id: r.id } }); await lsSpeichern() }
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
   HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
   await DB.set('history', HIST); await DB.del('draft'); S.r = null; S.prepared = null;
@@ -1192,7 +1268,11 @@ async function abgeschlossen(weg, wartet) {
 
 // ---------------------------------------------------------------- Ereignisse
 document.addEventListener('click', async e => {
-  const t = e.target.closest('button,[data-go],[data-delfoto]'); if (!t) return; const ds = t.dataset; const r = S.r;
+  const t = e.target.closest('button,[data-go],[data-delfoto],[data-lsedit],[data-lsday]'); if (!t) return; const ds = t.dataset; const r = S.r;
+  if (ds.lsedit) { LSV.offen = LSV.offen === ds.lsedit ? null : ds.lsedit; render(); return }
+  if (ds.lsday) { LSV.datum = ds.lsday; LSV.offen = null; render(); scrollTo(0, 0); return }
+  if (ds.lsdel) { if (await bestaetigen('Diesen Lieferschein aus der Liste löschen?')) { LSL = LSL.filter(e => e.id !== ds.lsdel); await lsSpeichern(); render() } return }
+  if (ds.lschip) { const [id, i] = ds.lschip.split('|'); const e = LSL.find(x => x.id === id); const c = e.ocr.chips[+i]; e.mat = c[1]; e.einh = c[2] || e.einh; await lsSpeichern(); render(); return }
   if (ds.view) { S.view = ds.view; render(); scrollTo(0, 0); return }
   if (ds.step) { S.step = +ds.step; render(); scrollTo(0, 0); return }
   if (ds.go) { e.preventDefault(); S.step = +ds.go; render(); scrollTo(0, 0); return }
@@ -1209,6 +1289,8 @@ document.addEventListener('click', async e => {
   if (ds.resend) { const h = HIST.find(x => x.id === ds.resend); if (h) prepare(clone(h)); return }
   if (ds.pick) {
     const [k, id] = ds.pick.split('|');
+    if (k === 'lslief') { openPicker('lief', l => { const e = LSL.find(x => x.id === id); e.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; lsSpeichern() }); return }
+    if (k === 'lsmat') { openPicker('mat', m => { const e = LSL.find(x => x.id === id); e.mat = m[0]; e.matnr = m[1] || ''; e.einh = m[2] || e.einh; lsSpeichern() }); return }
     if (k === 'von') openPicker('polier', m => { r.von = m[0] });
     if (k === 'lief') openPicker('lief', l => { const x = r.material.find(x => x.id === id); x.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('lief')) });
     if (k === 'mat') openPicker('mat', m => { const x = r.material.find(x => x.id === id); x.mat = m[0]; x.matnr = m[1] || ''; x.einh = m[2] || ''; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('mat')); if (!x.lief && ['MKB', 'BSR'].includes(m[3])) x.lief = m[3] });
@@ -1221,6 +1303,15 @@ document.addEventListener('click', async e => {
   if (a === 'telskip') telAntwort('überspringen');
   if (a === 'telvoice') { TEL.voice = !TEL.voice; if (!TEL.voice) try { speechSynthesis.cancel() } catch (e) { } telRender() }
   if (a === 'telende') telEnde(true);
+  if (a === 'lsliste') { if (!LSV.baunr) LSV.baunr = (S.r && S.r.baunr) || (HIST[0] && HIST[0].baunr) || ''; LSV.datum = today(); LSV.offen = null; S.view = 'lieferscheine'; render(); scrollTo(0, 0) }
+  if (a === 'lshand') { if (!LSV.baunr) { toast('Bitte zuerst die Baustellen-Nr. eintragen'); return } const prev = lsTag(LSV.baunr, LSV.datum).pop(); const e = { id: uid(), baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: prev ? prev.lief : '', mat: prev ? prev.mat : '', matnr: prev ? prev.matnr : '', einh: prev ? prev.einh : 'to', ls: '', menge: '', fotos: [], ocr: null }; LSL.push(e); LSV.offen = e.id; await lsSpeichern(); render() }
+  if (a === 'lsbericht') {
+    const tag = lsTag(LSV.baunr, LSV.datum);
+    if (!S.r || !(S.r.baustelle || S.r.personal.length || S.r.material.length)) { S.r = neuerBericht(); const h = HIST.find(x => x.baunr === LSV.baunr); Object.assign(S.r, { baunr: LSV.baunr, datum: LSV.datum }, h ? { baustelle: h.baustelle, bauteil: h.bauteil, bauherr: h.bauherr } : {}) }
+    const n = lsInBericht(S.r, tag, S.r.aps[0].id); S.view = 'erfassung'; S.step = 4; saveDraft(); render(); scrollTo(0, 0);
+    toast(`${n} Lieferschein(e) in den Tagesbericht übernommen${S.r.aps.length > 1 ? ' – Arbeitspaket bitte prüfen' : ''}`, 4000);
+  }
+  if (a === 'lsimport') lsPicker(r);
   if (a === 'install' && installEvt) { installEvt.prompt(); installEvt = null }
   if (a === 'neu') { S.r = neuerBericht(); S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0) }
   if (a === 'weiter') { S.view = 'erfassung'; render() }
@@ -1256,12 +1347,14 @@ document.addEventListener('click', async e => {
     await DB.set('settings', SET); toast('Gespeichert ✓'); S.view = 'home'; render();
   }
   if (a === 'lernreset') { if (await bestaetigen('Alles Gelernte zu Lieferscheinen löschen?')) { LERN = { alias: {}, lief: {} }; await DB.set('lernen', LERN); render() } }
-  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'history', 'queue', 'stammdaten', 'settings', 'lernen']) await DB.del(k); location.reload() } }
+  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'history', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
 });
 function bestaetigen(text) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
 
 document.addEventListener('input', e => {
-  const t = e.target, ds = t.dataset, r = S.r; if (!r) return;
+  const t = e.target, ds = t.dataset, r = S.r;
+  if (ds.lsf) { const [id, k] = ds.lsf.split('|'); const x = LSL.find(y => y.id === id); x[k] = k === 'menge' ? t.value.replace(',', '.') : t.value; clearTimeout(window.__lst); window.__lst = setTimeout(lsSpeichern, 400); return }
+  if (!r) return;
   if (ds.f) {
     r[ds.f] = t.value;
     if (ds.f === 'baunr') { const h = HIST.find(x => x.baunr === t.value.trim()); if (h && !r.baustelle) { r.baustelle = h.baustelle; r.bauteil = h.bauteil; r.bauherr = h.bauherr; ['baustelle', 'bauteil', 'bauherr'].forEach(k => { const i = document.querySelector(`[data-f=${k}]`); if (i) i.value = r[k] }); toast('Baustellendaten vom letzten Bericht übernommen') } }
@@ -1281,6 +1374,8 @@ document.addEventListener('change', async e => {
     catch (err) { info.innerHTML = `<span style="color:var(--rot)">${esc(err.message)}</span>` }
     return;
   }
+  if (ds.lsscan && t.files.length) { await lsScan([...t.files]); t.value = ''; return }
+  if (t.id === 'ls_bnr' || t.id === 'ls_dat') { if (t.id === 'ls_bnr') LSV.baunr = t.value.trim(); else LSV.datum = t.value || today(); LSV.offen = null; render(); return }
   if (!S.r) return;
   if (ds.f && ['datum', 'beginn', 'ende'].includes(ds.f)) render();
   if (ds.k === 'ap' && ds.m) render();
