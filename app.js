@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.8.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -87,9 +87,9 @@ async function importStammdaten(file) {
 // ---------------------------------------------------------------- Start
 async function init() {
   try {
-    SD = await DB.get('stammdaten'); SET = Object.assign(SET, await DB.get('settings') || {});
-    HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || [];
-    if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = await r.json(); await DB.set('stammdaten', SD) } } catch (e) { } }
+    SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
+    HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
+    if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
   } catch (e) { console.error(e) }
   S.view = SD ? 'home' : 'setup';
   render();
@@ -169,6 +169,7 @@ function vSettings() {
   <button class="btn orange full" data-act="savesettings">Speichern</button></div>
   <div class="card"><b>Stammdaten</b><div class="hint">${SD ? `${SD.ma.length} Mitarbeiter, ${SD.ge.length} Geräte, ${SD.mat.length} Materialien · Stand ${dateDe(SD.stand)}<br>Quelle: ${esc(SD.quelle || '')}` : 'nicht geladen'}</div>
   <span class="btn ghost full fotobtn">📂 Neue Excel/JSON laden<input type="file" id="s_file" accept=".xlsx,.xlsm,.json"></span><div id="s_info" class="hint"></div></div>
+  <div class="card"><b>Gelernte Lieferscheine</b><div class="hint">${Object.keys(LERN.lief).length} Lieferanten, ${Object.keys(LERN.alias).length} Briefköpfe zugeordnet. Die App lernt aus jedem gesendeten Bericht: welcher Briefkopf zu welchem Lieferanten gehört und welches Material dort meist geliefert wird.</div><button class="btn small ghost" data-act="lernreset">Gelerntes zurücksetzen</button></div>
   <div class="card"><b>Daten auf diesem Handy</b><p class="hint">Entwurf, Verlauf und Stammdaten liegen nur auf diesem Gerät.</p><button class="btn danger full" data-act="reset">Alles auf diesem Handy löschen</button></div>`;
 }
 
@@ -206,7 +207,7 @@ const apLbl = (a, i) => `<span class="ap-tag">AP ${esc(a.nr) || '?'}</span><span
 const stepper = (kind, id, ap, val) => `<div class="step"><button data-st="${kind}|${id}|${ap}|-0.25">−</button><input inputmode="decimal" data-hin="${kind}|${id}|${ap}" value="${val ? fmt(val) : ''}" placeholder="0"><button data-st="${kind}|${id}|${ap}|0.25">＋</button></div>`;
 function vPers() {
   const r = S.r, d = dauer(r); return `<h2>Personal</h2>
-<div class="grid2" style="margin-bottom:6px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne vom letzten Bericht</button></div>
+<div class="grid2" style="margin-bottom:6px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne + Stunden vom letzten Bericht</button></div>
 ${HIST.length > 1 ? `<button class="btn ghost small full" style="margin-bottom:10px;border-style:dashed" data-act="kolonnewahl">Kolonne aus älterem Bericht …</button>` : ''}
 ${r.personal.length ? `<div class="card" style="background:#f6f6f6"><div class="prow"><div class="hint" style="margin:0">Arbeitszeit lt. Abschluss: <b>${fq(d)} h</b></div><button class="btn small ghost" data-act="copyh">Stunden der 1. Person für alle</button></div></div>` : `<div class="empty">Noch niemand eingetragen.</div>`}
 ${r.personal.map(p => { const s = sumH(p); const warn = !p.zus && Math.abs(s - d) > 0.01; return `<div class="card">
@@ -244,8 +245,8 @@ function vAbschluss() {
 <div class="card"><div class="grid2"><div><label style="margin-top:0">Beginn</label><input type="time" data-f="beginn" value="${r.beginn}"></div><div><label style="margin-top:0">Ende</label><input type="time" data-f="ende" value="${r.ende}"></div></div>
 <label>Pause</label><div class="chips">${PAUSEN.map(p => `<button class="chip ${r.pause === p ? 'on' : ''}" data-pause="${p}">${p}</button>`).join('')}</div>
 <div class="hint" style="margin-top:8px">Dauer: <b>${fq(dauer(r))} h</b></div></div>
-<div class="card"><label style="margin-top:0">Bemerkungen / abweichende Arbeitszeit</label><textarea data-f="bem" placeholder="z. B. Segmehl bis 16:00 Uhr">${esc(r.bem)}</textarea>
-<label>Wichtige Vorkommnisse, Besprechungen (Bautagebuch)</label><textarea data-f="vork" placeholder="z. B. Abnahme mit Bauleitung">${esc(r.vork)}</textarea>
+<div class="card"><label style="margin-top:0">Bemerkungen / abweichende Arbeitszeit</label><textarea data-f="bem" placeholder="z. B. Mustermann bis 16:00 Uhr">${esc(r.bem)}</textarea>
+<label>Wichtige Vorkommnisse, Besprechungen (Bautagebuch)</label><textarea data-f="vork" placeholder="z. B. Baubesprechung mit Mustermann">${esc(r.vork)}</textarea>
 <div class="mic">🎤 Mikrofon auf der Tastatur antippen: diktieren statt tippen.</div></div>
 <h3>Prüfung ${e ? `<span class="badge" style="background:#fdecea;color:var(--rot)">${e} Fehler</span>` : ''} ${w ? `<span class="badge b-pr">${w} Hinweise</span>` : ''}</h3>
 <div class="card">${res.length ? res.map(x => `<div class="check"><span class="dot ${x.t}">${x.t === 'e' ? '!' : '?'}</span><div>${x.m} <a href="#" data-go="${x.s}">ändern</a></div></div>`).join('') : `<div class="check"><span class="dot ok">✓</span><div>Alles vollständig.</div></div>`}</div>
@@ -255,132 +256,345 @@ function vAbschluss() {
 function docViewer(r) { return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
 const pickBtn = (k, label) => `<button class="btn ghost full" style="justify-content:space-between;font-weight:600" data-pick="${k}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span>▾</span></button>`;
 
-const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace('~', '') === k) ? 'ocr' : '';
+const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace(/[~^]/, '') === k) ? 'ocr' : '';
 function ocrHinweis(m) {
   const o = m.ocr, n = { ls: 'Lieferschein-Nr.', menge: 'Menge', mat: 'Material', lief: 'Lieferant' };
-  const erk = o.auto.filter(f => !f.endsWith('~')).map(f => n[f]), uebern = o.auto.filter(f => f.endsWith('~')).map(f => n[f.replace('~', '')]);
+  const erk = o.auto.filter(f => !/[~^]$/.test(f)).map(f => n[f]), uebern = o.auto.filter(f => f.endsWith('~')).map(f => n[f.replace('~', '')]), gel = o.auto.filter(f => f.endsWith('^')).map(f => n[f.replace('^', '')]);
   const dw = o.datum && o.datum !== S.r.datum ? `<br>⚠️ Datum auf dem Lieferschein: <b>${dateDe(o.datum)}</b> – passt nicht zum Bericht.` : '';
-  return `<div class="ocrbox">${o.fehler ? 'Texterkennung fehlgeschlagen – bitte von Hand ausfüllen.' : erk.length ? `🔍 Automatisch erkannt: <b>${erk.join(', ')}</b> – bitte prüfen.` : 'Nichts sicher erkannt – bitte von Hand ausfüllen.'}${uebern.length ? `<br>↺ Vom vorherigen Lieferschein übernommen: ${uebern.join(', ')}` : ''}${dw}
+  const chips = o.chips ? `<div class="chips" style="margin:6px 0 2px">${o.chips.map((c, i) => `<button class="chip ${m.mat === c[1] ? 'on' : ''}" data-matchip="${m.id}|${i}">${esc(c[0])}</button>`).join('')}</div>` : '';
+  return `<div class="ocrbox">${o.profil ? `🏷️ Erkannt als: <b>${esc(o.profil)}</b><br>` : ''}${o.miete ? 'Miete/Regie: Menge in <b>Stunden</b>, Fahrzeug unten antippen.' + chips : chips ? 'Material schnell wählen:' + chips : ''}${o.fehler ? 'Texterkennung fehlgeschlagen – bitte von Hand ausfüllen.' : erk.length ? `🔍 Automatisch erkannt: <b>${erk.join(', ')}</b> – bitte prüfen.` : 'Nichts sicher erkannt – bitte von Hand ausfüllen.'}${uebern.length ? `<br>↺ Vom vorherigen Lieferschein übernommen: ${uebern.join(', ')}` : ''}${gel.length ? `<br>🧠 Aus früheren Lieferscheinen dieses Lieferanten: ${gel.join(', ')}` : ''}${o.liefNeu ? '<br>🆕 Lieferant nicht in der Liste – Name aus dem Briefkopf übernommen. Bitte prüfen; die App merkt sich die Zuordnung.' : ''}${dw}
   ${o.text ? `<details><summary>Erkannten Text anzeigen</summary><pre>${esc(o.text)}</pre></details>` : ''}</div>`;
 }
 async function vorlageMitPruefung(h) { if (S.r && (S.r.personal.length || S.r.baustelle) && !(await bestaetigen('Der aktuelle Entwurf wird durch die Vorlage ersetzt. Fortfahren?'))) return; vorlageAus(h) }
 
 // ---------------------------------------------------------------- Lieferschein-Texterkennung (OCR, läuft auf dem Handy, offline)
-let ocrWorker = null;
-async function ocrInit(progress) {
+// Feste Ergänzungen der Stammdaten (bleiben auch nach Excel-Import erhalten)
+const EXTRA_LIEF = ['a+b', 'SWK', 'Ehinger Beton', 'Kessler'];
+const MIETE = ['LKW 3-Achser', 'LKW 4-Achser', 'Sattelzug', 'Traktor', 'Hängerzug', 'Bagger mit Bedienung'];
+const EXTRA_MAT = [...MIETE.map(n => [n, '', 'Std', 'Miete / Regie']), ['Aushub (Anlieferung)', '', 'm3', 'MKB'], ['AC 11 DS', '', 'to', 'Asphalt']];
+// Material-Nummern auf dem BSR Liefer- und Wiegeschein
+const BSR_CODES = { '60': 'Ablagerung Asphalt', '65': 'Ablagerung Beton', '86': 'Zuschlag für Übergröße', '01': 'Moränesand 0/2 gew.', '02': 'Moränesand 0/4 gew.', '03': 'Moränesand 0/8 gew.', '08': 'Moränekiessand-Gemisch 0/16 gew.', '09': 'Moränekiessand-Gemisch 0/32 gew.', '10': 'Schwemmsand', '15': 'Moräne Auffüllkies 4/X', '16': 'Auffüllkies 0/X', '17': 'Frostschutzkies 0/32', '37': 'Wiegen mit geeichter Waage', '44': 'Gemisch 0/16 gebrochen', '46': 'Frostschutzkies 0/45 güteüberwacht', '75': 'Beton-Bruch 0/45', '79': 'Beton-Schroppen 45/X', '82': 'Asphalt-Bruch' };
+function sdErgaenzen(sd) {
+  if (!sd) return sd;
+  EXTRA_LIEF.forEach(l => { if (!sd.lief.some(x => x.toLowerCase() === l.toLowerCase())) sd.lief.push(l) });
+  sd.lief.sort((a, b) => a.localeCompare(b, 'de'));
+  EXTRA_MAT.forEach(m => { if (!sd.mat.some(x => x[0] === m[0])) sd.mat.push(m) });
+  return sd;
+}
+
+let ocrWorker = null, ocrProg = null;
+async function ocrInit() {
   if (ocrWorker) return ocrWorker;
   const base = new URL('vendor/tesseract/', location.href).href;
   ocrWorker = await Tesseract.createWorker('deu', 1, {
     workerPath: base + 'worker.min.js', corePath: base, langPath: base.replace(/\/$/, ''), gzip: true, workerBlobURL: false,
-    logger: m => { if (progress && m.status === 'recognizing text') progress(m.progress) }
+    logger: m => { if (ocrProg && m.status === 'recognizing text') ocrProg(m.progress) }
   });
   return ocrWorker;
 }
-// Bild für die Erkennung aufbereiten: Graustufen, Kontrast, sinnvolle Größe
-async function ocrBild(file) {
-  const bmp = await createImageBitmap(file); const s = Math.min(2, 3000 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
-  const x = c.getContext('2d'); x.filter = 'grayscale(1) contrast(1.6)'; x.drawImage(bmp, 0, 0, c.width, c.height); return c;
+// Bild drehen, verkleinern und aufbereiten. mode 'c' = Kontrast, 'a' = adaptive Schwelle (für blassen Nadeldruck/Grauflächen)
+function ocrCanvas(bmp, rot, mode, max) {
+  const s = Math.min(2, max / Math.max(bmp.width, bmp.height)), W = Math.round(bmp.width * s), H = Math.round(bmp.height * s);
+  const c = document.createElement('canvas'); if (rot % 180) { c.width = H; c.height = W } else { c.width = W; c.height = H }
+  const x = c.getContext('2d', { willReadFrequently: true }); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  x.translate(c.width / 2, c.height / 2); x.rotate(rot * Math.PI / 180); x.filter = 'grayscale(1)'; x.drawImage(bmp, -W / 2, -H / 2, W, H); x.setTransform(1, 0, 0, 1, 0, 0); x.filter = 'none';
+  const w = c.width, h = c.height, d = x.getImageData(0, 0, w, h), p = d.data;
+  if (mode === 'g') { }
+  else if (mode === 'c') { for (let i = 0; i < p.length; i += 4) { const v = Math.max(0, Math.min(255, (p[i] - 128) * 1.6 + 128)); p[i] = p[i + 1] = p[i + 2] = v } }
+  else {
+    const g = new Uint32Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) { let row = 0; for (let xx = 0; xx < w; xx++) { row += p[(y * w + xx) * 4]; g[(y + 1) * (w + 1) + xx + 1] = g[y * (w + 1) + xx + 1] + row } }
+    const r = Math.max(8, Math.round(Math.max(w, h) / 80));
+    for (let y = 0; y < h; y++) { const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1); for (let xx = 0; xx < w; xx++) { const x0 = Math.max(0, xx - r), x1 = Math.min(w, xx + r + 1); const sum = g[y1 * (w + 1) + x1] - g[y0 * (w + 1) + x1] - g[y1 * (w + 1) + x0] + g[y0 * (w + 1) + x0]; const i = (y * w + xx) * 4; const v = p[i] < sum / ((y1 - y0) * (x1 - x0)) * 0.88 ? 0 : 255; p[i] = p[i + 1] = p[i + 2] = v } }
+  }
+  x.putImageData(d, 0, 0); return c;
 }
-const LIEF_ALIAS = { MKB: ['moränekieswerk', 'moranekieswerk', 'moraenekieswerk', 'kieswerk baustetten', 'mkb'], BSR: ['baustoffrecycling', 'baustoff-recycling', 'bsr'] };
+// Ausrichtung erkennen, dann bis zu 3 Durchgänge mit verschiedenen Einstellungen, bis LS-Nr., Menge und Material gefunden sind
+async function ocrLesen(file, status) {
+  const w = await ocrInit(), bmp = await createImageBitmap(file);
+  status('Ausrichtung wird geprüft …');
+  await w.setParameters({ tessedit_pageseg_mode: '3' });
+  let rot = 0, best = (await w.recognize(ocrCanvas(bmp, 0, 'c', 1400))).data.confidence;
+  if (best < 70) for (const r of [90, 270]) { const cf = (await w.recognize(ocrCanvas(bmp, r, 'c', 1400))).data.confidence; if (cf > best + 5) { best = cf; rot = r } }
+  if (best < 50) { const cf = (await w.recognize(ocrCanvas(bmp, 180, 'c', 1400))).data.confidence; if (cf > best + 5) { best = cf; rot = 180 } }
+  const passes = [['a', '6', 2600], ['c', '6', 2000], ['g', '3', 2600], ['a', '11', 2600]]; let text = '', res = null;
+  for (let i = 0; i < passes.length; i++) {
+    const [mode, psm, mx] = passes[i];
+    ocrProg = p => status(`Text wird gelesen (${i + 1}/${passes.length}) … ${Math.round(p * 100)} %`);
+    await w.setParameters({ tessedit_pageseg_mode: psm });
+    text += '\n' + ((await w.recognize(ocrCanvas(bmp, rot, mode, mx))).data.text || '');
+    res = parseLieferschein(text);
+    if (res.ls && res.menge && res.mat) break;
+  }
+  ocrProg = null; return { text, res, rot };
+}
+
+// Ausgeschriebene Firmennamen → Kürzel aus den Stammdaten (z. B. Moränekieswerk Baustetten → MKB)
+const LIEF_ALIAS = { MKB: ['moränekieswerk', 'moranekieswerk', 'moraenekieswerk', 'moränekies baustetten', 'kieswerk baustetten'], BSR: ['baustoffrecycling', 'baustoff-recycling', 'baustoff recycling'],
+  'a+b': ['a+b asphalt', 'asphalt- und betonmischwerke', 'asphalt und betonmischwerke', 'splittwerk ingoldingen'], SWK: ['schotterwerk kirchen'], GeRe: ['gere transporte', 'gerold rehm'],
+  Mantz: ['hubert mantz', 'fuhrunternehmen mantz'], Kessler: ['paul kessler', 'baggerbetrieb kessler'], 'Ehinger Beton': ['ehinger beton', 'tbw-ehingen', 'transportbetonwerk ehingen'] };
+const MORPH = /(moräne|morane|kies|sand|splitt|schotter|werk|stoff|recycling|beton|asphalt|misch|bau|transport|handel|erd|tief|fuhr|unternehmen|gesellschaft)/gi;
+function liefKurz(text) {   // findet zu einem Firmennamen das Kürzel aus den Stammdaten
+  if (!text) return ''; const low = String(text).toLowerCase(), SDL = (SD && SD.lief) || [];
+  const inSD = k => SDL.find(l => l.toLowerCase() === k.toLowerCase()) || k;
+  for (const [k, al] of Object.entries(LIEF_ALIAS)) if (al.some(a => low.includes(a))) return inSD(k);
+  const wort = SDL.filter(l => l.length >= 3).sort((a, b) => b.length - a.length).find(l => new RegExp('(^|[^a-zäöüß])' + l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-zäöüß])').test(low));
+  if (wort) return wort;
+  // Abkürzung aus Anfangsbuchstaben (auch von Wortteilen): „Baustoffrecycling Laupheim“ → B-S-R-L → BSR
+  const ini = String(text).split(/[^A-Za-zÄÖÜäöüß]+/).filter(w => w.length >= 2 && !/^(gmbh|co|kg|ag|und|der|die|das)$/i.test(w)).flatMap(w => { const p = w.replace(MORPH, ' $1 ').trim().split(/\s+/).filter(Boolean); return p.map(x => x[0].toUpperCase()) }).join('');
+  for (const l of SDL) {
+    if (!/^[A-ZÄÖÜ]{3,4}$/.test(l) || ini[0] !== l[0]) continue; let i = 0; for (const ch of ini) if (ch === l[i]) i++; if (i === l.length) return l;
+  }
+  return '';
+}
 function zahlDe(s) { s = String(s).replace(/\s/g, ''); if (s.includes(',')) return parseFloat(s.replace(/\./g, '').replace(',', '.')); if (/^\d{1,3}(\.\d{3})+$/.test(s)) return parseFloat(s.replace(/\./g, '')); return parseFloat(s) }
+const r2 = v => Math.round(v * 100) / 100;
+function wiegeNetto(t) {   // Brutto / Tara / Netto als drei Gewichte hintereinander → Netto
+  const v = []; let m; const re = /(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*(kg|t|to)\b/gi;
+  while ((m = re.exec(t))) { let x = zahlDe(m[1]); if (/kg/i.test(m[2])) x /= 1000; else if (/^\d{1,3}\.\d{3}$/.test(m[1])) x = parseFloat(m[1]); v.push(x) }
+  for (let i = 0; i + 2 < v.length; i++) if (v[i] > v[i + 1] && Math.abs(v[i] - v[i + 1] - v[i + 2]) < 0.05 && v[i + 2] > 0) return r2(v[i + 2]);
+  return null;
+}
+const MIET_RE = [[/3\s*-?\s*achs/i, 'LKW 3-Achser'], [/4\s*-?\s*achs/i, 'LKW 4-Achser'], [/sattel/i, 'Sattelzug'], [/tra[ck]+tor/i, 'Traktor'], [/h[äa]nger|anh\./i, 'Hängerzug'], [/bagger|hydraulik/i, 'Bagger mit Bedienung']];
+const mietChips = () => MIETE.map(n => [n.replace('LKW ', ''), n, 'Std']);
+function regieStunden(t) {
+  let m = t.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:std|stunden|h)\b/i); if (m) return zahlDe(m[1]);
+  const z = [...t.matchAll(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/g)].map(x => +x[1] + x[2] / 60).filter(x => x >= 5 && x <= 20);
+  if (z.length >= 2 && z[1] > z[0]) return r2(z[1] - z[0]);
+  return null;
+}
+function regieMaterial(t, def) { const f = MIET_RE.find(([re]) => re.test(t)); return f ? f[1] : def || '' }
+// Asphaltsorte wie „AC 11 DS 50/70“ → Stammdaten-Material „AC 11 DS“ (bzw. nächstliegende Sorte)
+function asphaltSorte(t) {
+  const m = t.match(/\b(AC|SMA|MA|PA)\s?(\d{1,2})\s?([TBDSNL]{1,3})\b/); if (!m) return null;
+  const code = `${m[1]} ${m[2]} ${m[3]}`, norm = s => s.replace(/\s+/g, '').toUpperCase();
+  const sd = SD.mat.find(x => norm(x[0]) === norm(code)) || SD.mat.find(x => norm(x[0]).startsWith(norm(code))) || null;
+  return sd ? { mat: sd[0], matnr: sd[1], einh: sd[2] || 'to' } : { mat: code, matnr: '', einh: 'to' };
+}
+// Regeln je Lieferant: erkennen am Briefkopf, dann gezielt LS-Nr., Menge und Material lesen
+const LS_PROFILE = [
+  { id: 'BSR', name: 'Baustoffrecycling Laupheim (BSR)', lief: 'BSR', re: /baustoff\s*-?\s*recycling|kies-\s*und\s*sandvertrieb/i, einh: 'to', nurMat: true,
+    chips: () => ['60', '65', '82', '75', '46', '17', '16'].map(k => [k + ' ' + BSR_CODES[k], BSR_CODES[k], 'to']),
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/wiegeschein\D{0,25}(\d{5,7})/i) || t.match(/\b(2\d{5})\b/))) o.ls = m[1];
+      if ((m = t.match(/\bN\s*[:;.]\s*(\d{3,6})\s*kg/i))) o.menge = r2(+m[1] / 1000);
+      else { const ks = [...t.matchAll(/\b(\d{4,6})\s*[k&xX]?\s?[g9]\b/g)].map(x => +x[1]).filter(x => x >= 1000); if (ks.length) o.menge = r2(Math.min(...ks) / 1000) }
+      if ((m = t.match(/mat\.?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
+      return o } },
+  { id: 'a+b', name: 'a+b Asphalt- und Betonmischwerke', lief: 'a+b', re: /a\s*\+\s*b\s*asphalt|asphalt-?\s*und\s*betonmischwerke|splittwerk\s*ingoldingen|ausgangslieferschein/i, einh: 'to',
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/ausgangs\s*-?\s*lieferschein\s*nr\.?\s*:?\s*(\d{5,7})/i))) o.ls = m[1];
+      if ((m = t.match(/\bN\s*[:.]?\s*(\d{1,3}[.,]\d{2})\s*t/))) o.menge = zahlDe(m[1]);
+      const s = asphaltSorte(t); if (s) Object.assign(o, s); else if ((m = t.match(/material\s*\w{0,6}\s*\n\s*([^\n]{4,45})/i))) o.mat = m[1].trim();
+      return o } },
+  { id: 'MKB', name: 'Moränekieswerk Baustetten (MKB)', lief: 'MKB', re: /mor[aä]nekies(?!sand)|splittwerke|kies\s*und\s*splitt/i, einh: 'to', nurProfil: true,
+    chips: () => [['Aushub', 'Aushub (Anlieferung)', 'm3'], ...SD.mat.filter(m => m[3] === 'MKB' && !/aushub/i.test(m[0])).slice(0, 7).map(m => [m[0], m[0], m[2]])],
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/bon\s*-?\s*nr\.?\s*:?\s*(\d{3,})/i))) o.ls = m[1];
+      else if ((m = t.match(/fahrzeug\s*:?\s*([A-ZÄÖÜ]{1,3}\s*-\s*[A-Z]{1,2}\s*\d{1,4})/i))) o.ls = 'Fzg ' + m[1].replace(/\s+/g, ' ').toUpperCase();
+      const g = t.match(/gewicht\D{0,12}(\d+(?:[.,]\d+)?)\s*(m3|m³|m\s*3|t|to)?/i), n = t.match(/(\d{1,2})\s*fuhren/i) || t.match(/wiegungen\D{0,6}(\d{1,2})/i);
+      if (g && g[2]) { o.menge = r2(zahlDe(g[1]) * (n ? +n[1] : 1)); if (/m/i.test(g[2])) o.einh = 'm3' }
+      if (/aushub/i.test(t)) { o.mat = 'Aushub (Anlieferung)'; o.einh = 'm3' }
+      return o } },
+  { id: 'SWK', name: 'SWK Schotterwerk Kirchen', lief: 'SWK', re: /schotterwerk|\bswk\b/i, einh: 'to',
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/lieferschein[^\d]{0,40}?(\d{3}\.\d{3})\b/i) || t.match(/\b(\d{3}\.\d{3})\b(?!\s*(t|kg))/))) o.ls = m[1];
+      if ((m = t.match(/\b0\d{3}\s*\n+\s*([A-ZÄÖÜ][A-Za-zÄÖÜäöüß. ]*\d+\/\d+)/))) o.mat = m[1].trim();
+      else if ((m = t.match(/(schottertragschicht[^\n]{0,40}|frostschutz[^\n]{0,30})/i))) o.mat = m[1].trim();
+      return o } },
+  { id: 'Muffenrohr', name: 'Muffenrohr Tiefbauhandel', lief: 'Muffenrohr', re: /muffenrohr/i, einh: 'Stk',
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/\b(45\d{8})\b/) || t.match(/lieferschein[\s\S]{0,80}?(\d{8,12})/i))) o.ls = m[1];
+      const pos = []; const re = /\b000[1-9]0\s+(\d{5,7})\s+(\d+(?:[.,]\d+)?)\s*(ST|STK|M|KG|T|PAL)\b[^\n]*\n\s*([^\n]+)/gi;
+      while ((m = re.exec(t))) { const d = m[4].replace(/\s+(ACHTUNG|Positionsgewicht)[\s\S]*$/i, '').trim().replace(/\s+/g, ' '); if (/palette/i.test(d) || (d.match(/[a-zäöüß]/gi) || []).length < 4 || pos.some(x => x.matnr === m[1])) continue; pos.push({ mat: d, matnr: m[1], menge: zahlDe(m[2]), einh: /^st/i.test(m[3]) ? 'Stk' : m[3].toLowerCase() }) }
+      if (pos.length) { Object.assign(o, pos[0]); o.pos = pos }
+      return o } },
+  { id: 'Ehinger', name: 'Ehinger Beton', lief: 'Ehinger Beton', re: /ehinger\s*beton|tbw-ehingen/i, einh: 'm3',
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/lieferschein\s*-?\s*n\S{0,3}\s*:?\s*(\d{5,7})/i))) o.ls = m[1];
+      if ((m = t.match(/\bist\s*:?\s*(\d+[.,]\d{1,2})/i) || t.match(/menge\s*\(m.{0,2}\)[\s\S]{0,60}?(\d+[.,]\d{2})/i))) o.menge = zahlDe(m[1]);
+      o.mat = (m = t.match(/\b(C\s?\d{1,2}\s?\/\s?\d{2}[^\n]{0,25})/)) ? 'Beton ' + m[1].trim() : 'Transportbeton';
+      return o } },
+  { id: 'GeRe', name: 'GeRe Transporte (Miete/Regie)', lief: 'GeRe', re: /gere\s*transporte|gerold\s*rehm/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/transportauftrag\s*nr[\s\S]{0,45}?\b(\d{5,8})\b/i) || t.match(/\b(00\d{4})\b/))) o.ls = m[1]; o.menge = regieStunden(t); o.mat = regieMaterial(t); return o } },
+  { id: 'Mantz', name: 'Hubert Mantz Fuhrunternehmen (Miete/Regie)', lief: 'Mantz', re: /hubert\s*mantz|\bmantz\b/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/(?:regiebericht|rapport)[^\n]{0,15}?nr\.?\s*:?\s*(\d{1,6})/i))) o.ls = m[1]; o.menge = regieStunden(t); o.mat = regieMaterial(t); return o } },
+  { id: 'Kessler', name: 'Paul Kessler Baggerbetrieb (Miete/Regie)', lief: 'Kessler', re: /paul\s*kessler|kessler\s*gmbh|baggerbetrieb/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/(?:regiebericht|rapport)[^\n]{0,15}?nr\.?\s*:?\s*(\d{1,6})/i))) o.ls = m[1]; o.menge = regieStunden(t); o.mat = regieMaterial(t, 'Bagger mit Bedienung'); return o } },
+  { id: 'Regie', name: 'Rapport / Regiebericht (Miete)', lief: '', re: /regiebericht|rapport\s*\/|transportauftrag/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/(?:regiebericht|rapport|transportauftrag)[^\n]{0,15}?nr\.?\s*:?\s*(\d{1,8})/i))) o.ls = m[1]; o.menge = regieStunden(t); o.mat = regieMaterial(t); return o } },
+];
+// ---- Allgemeine Regeln (aus den Beispiel-Lieferscheinen abgeleitet, gelten für jeden Lieferanten)
+const EIGEN = /schwall|neue\s*welt|88471|laupheim(?!\s*gmbh)|bauunternehmung/i;   // eigene Anschrift auf dem Beleg ignorieren
+const FIRMA_RE = /(GmbH|\bKG\b|\bAG\b|\be\.\s?K\.|\bOHG\b|\bUG\b|\b(?:fuhrunternehmen|transporte?\b|spedition|baggerbetrieb|erdbau|tiefbau|baustoffe?|beton\b|betonwerk|kieswerk|schotterwerk|splittwerk|mischwerk|asphalt|recycling|handel|containerdienst|entsorgung)\b)/i;
+const istFirmaZeile = l => /(GmbH|\bKG\b|\bAG\b|\be\.\s?K\.|\bOHG\b|\bUG\b)/.test(l) || /\b(fuhrunternehmen|transporte?|spedition|baggerbetrieb|erdbau|tiefbau|baustoffe?|betonwerk|kieswerk|schotterwerk|splittwerk|mischwerk|recycling|handel|containerdienst|entsorgung)\b/i.test(l);
+const MIET_TEXT = /regiebericht|rapport|transportauftrag|stundenzettel|stundenlohn|tagelohn|arbeitsnachweis|maschinenmiete|mit\s*bedienung/i;
+function briefkopf(t) {   // Firmenname aus dem Kopf des Belegs (erste Zeilen mit GmbH, KG, Transporte …, nicht Schwall)
+  const lines = t.split('\n').map(l => l.trim()).filter(l => l.length >= 4).slice(0, 40);
+  const z = lines.find(l => istFirmaZeile(l) && !EIGEN.test(l) && /[A-ZÄÖÜ][a-zäöüß]{3,}/.test(l) && (l.match(/[A-Za-zÄÖÜäöüß]/g) || []).length >= 8);
+  if (!z) return '';
+  return z.replace(/[,·•|].*$/, '').replace(/\s{2,}.*$/, '').replace(/[^A-Za-zÄÖÜäöüß0-9&+.\- ]/g, '').trim().slice(0, 45);
+}
+const kopfKey = s => String(s).toLowerCase().replace(/gmbh|co\.?|kg|ag\b|&/g, '').replace(/[^a-z0-9äöüß]/g, '').slice(0, 24);
+function generischLesen(t) {
+  const o = {}; let m;
+  // LS-Nr.: Zahl hinter einem der bekannten Etiketten (nicht hinter „…-Datum“, „Kunden-Nr.“, „Auftrags-Nr.“)
+  const lab = /(stundenzettel\s*(?:nr\.?)?|arbeitsnachweis\s*(?:nr\.?)?|liefer\s*-?\s*schein(?:\s*-?\s*n(?:r|ummer)\.?)?|liefer-?\s*und\s*wiegeschein|wiege\s*-?\s*schein(?:\s*-?\s*nr\.?)?|bon\s*-?\s*nr\.?|beleg\s*-?\s*nr\.?|transportauftrag\s*(?:nr\.?)?|regiebericht\s*(?:nr\.?)?|rapport\s*(?:\/\s*regiebericht)?\s*(?:nr\.?)?|ls\s*-?\s*nr\.?|lieferscheinnummer)/gi;
+  while ((m = lab.exec(t))) {
+    const rest = t.slice(m.index + m[0].length, m.index + m[0].length + 70);
+    if (/^\s*-?\s*datum/i.test(rest)) continue;
+    const r0 = rest.replace(/(kunden|auftrags|bestell|kd)\s*-?\s*nr\.?\s*:?\s*\d+/gi, ' ').replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, ' ');
+    const re2 = /(\d{3}\.\d{3}(?!\s*(?:t|kg))|\d{2}-\d{2}-\d{4,6}|\b[A-Z]{0,3}\d{3,12}\b)/g; let z, ok = null;
+    while ((z = re2.exec(r0))) { const nach = r0.slice(z.index + z[1].length); if (/^\d{5}$/.test(z[1]) && /^\s+[A-ZÄÖÜ][a-zäöüß]{2,}/.test(nach) && !/^\s+[A-Za-zÄÖÜäöüß-]+\s*[:.]/.test(nach) && !/^\s+(datum|kunden|auftrag|seite|uhrzeit|liefer|bestell|fahrzeug|baustelle|vom|von|menge|artikel|sorte)/i.test(nach)) continue; if (/^\s*(?:tel|fax|\/)/i.test(nach)) continue; ok = z[1]; break }
+    if (ok) { o.ls = ok; break }
+  }
+  // Menge
+  let q = wiegeNetto(t); if (q != null) o.einh = 'to';
+  if (q == null && (m = t.match(/\bN(?:etto)?\s*[:;.]\s*(\d{3,6})\s*kg/i))) { q = r2(+m[1] / 1000); o.einh = 'to' }
+  if (q == null) {
+    const N = '(\\d{1,3}(?:[.\\s]\\d{3})+(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
+    const grab = w => { const x = t.match(new RegExp(w + '[^\\d\\n]{0,25}' + N + '\\s*(kg|t|to|tonnen|m3|m³|m²|m2|lfm|m\\b|stk|st|std|h)?', 'i')); return x ? { v: zahlDe(x[1]), u: (x[2] || '').toLowerCase() } : null };
+    const g = grab('netto(?:\\s*-?\\s*gewicht)?') || grab('liefermenge') || grab('menge') || grab('ladegewicht') || grab('\\bist\\b');
+    if (g && isFinite(g.v) && g.v > 0) { q = r2(g.u === 'kg' || (!g.u && g.v > 200) ? g.v / 1000 : g.v); if (/m3|m³/.test(g.u)) o.einh = 'm3'; else if (/^(t|to|tonnen|kg)$/.test(g.u)) o.einh = 'to'; else if (/st/.test(g.u) && !/std/.test(g.u)) o.einh = 'Stk'; else if (/std|^h$/.test(g.u)) o.einh = 'Std' }
+  }
+  if (q != null) o.menge = q;
+  // Material: hinter „Sorte“, „Artikel(bezeichnung)“, „Material“, „Produkt“; Betonklasse
+  if ((m = t.match(/\b(?:sorte|artikelbezeichnung|artikel|material|produkt|bezeichnung)\b\s*[:.]?\s*(?:\d{2,6}\s+)?([A-Za-zÄÖÜäöüß][^\n]{3,45})/i)) && !/menge|nr\.|bestell|einheit|preis/i.test(m[1])) o.mat = m[1].trim().replace(/\s+/g, ' ');
+  else if ((m = t.match(/\b(C\s?\d{1,2}\s?\/\s?\d{2}[^\n]{0,25})/))) o.mat = 'Beton ' + m[1].trim();
+  // Miete / Regie
+  if (MIET_TEXT.test(t)) { o.miete = true; o.einh = 'Std'; const h = regieStunden(t); o.menge = h != null ? h : undefined; o.mat = regieMaterial(t) || undefined }
+  return o;
+}
+
+// ---- Lernspeicher: was Poliere korrigieren, merkt sich die App (je Handy)
+let LERN = { alias: {}, lief: {} };
+function lernen(r) {
+  (r.material || []).forEach(m => {
+    if (!m.lief) return;
+    const L = LERN.lief[m.lief] = LERN.lief[m.lief] || { mat: {}, einh: '', miete: 0, n: 0 };
+    L.n++; if (m.mat) L.mat[m.mat] = (L.mat[m.mat] || 0) + 1; if (m.einh) L.einh = m.einh; if (m.einh === 'Std') L.miete++;
+    if (m.ocr && m.ocr.kopf) { const k = kopfKey(m.ocr.kopf); if (k.length >= 5) LERN.alias[k] = m.lief }
+  });
+  DB.set('lernen', LERN).catch(() => { });
+}
+const lernMat = lief => { const L = LERN.lief[lief]; if (!L) return []; return Object.entries(L.mat).sort((a, b) => b[1] - a[1]).map(x => x[0]) };
+
 function parseLieferschein(text) {
-  const t = text.replace(/[|]/g, ' ').replace(/[ \t]+/g, ' '), low = t.toLowerCase(), flat = low.replace(/\s+/g, '');
+  const t = text.replace(/[|]/g, ' ').replace(/[ \t]+/g, ' '), low = t.toLowerCase(), flat = low.replace(/\s+/g, ''), flatA = low.replace(/[^a-z0-9äöüß]/g, '');
   const out = { felder: [] };
-  // Lieferant
-  for (const [k, al] of Object.entries(LIEF_ALIAS)) if (al.some(a => low.includes(a))) { out.lief = k; break }
-  if (!out.lief) { const hit = SD.lief.filter(l => l.length >= 3).sort((a, b) => b.length - a.length).find(l => new RegExp('\\b' + l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(low)); if (hit) out.lief = hit }
-  // Material: Materialnummer (stark) oder Name
-  let best = null;
-  for (const m of SD.mat) {
-    if (m[1] && m[1].length >= 4 && new RegExp('\\b' + m[1] + '\\b').test(t)) { best = { m, s: 100 }; break }
-    const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length >= 4 && flat.includes(n) && (!best || n.length > best.s)) best = { m, s: n.length };
+  const P = LS_PROFILE.find(p => p.re.test(t));
+  out.kopf = briefkopf(t);
+  // Lieferant: 1. feste Regel, 2. Gelerntes, 3. Stammdaten-Name im Text, 4. Briefkopf (neuer Lieferant)
+  if (P && P.lief) out.lief = P.lief;
+  if (!out.lief) { const hit = Object.entries(LERN.alias).sort((a, b) => b[0].length - a[0].length).find(([k]) => flatA.includes(k)); if (hit) { out.lief = hit[1]; out.gelernt = true } }
+  if (!out.lief) { const k = liefKurz(t); if (k) out.lief = k }
+  if (!out.lief) { const hit = SD.lief.filter(l => l.length >= 3).sort((a, b) => b.length - a.length).find(l => new RegExp('(^|[^a-zäöüß])' + l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-zäöüß])').test(low)); if (hit) out.lief = hit }
+  if (!out.lief && out.kopf) { const k = liefKurz(out.kopf); if (k) out.lief = k; else { out.lief = out.kopf; out.liefNeu = true } }
+  // Material aus Stammdaten (Asphaltsorte, Materialnummer oder Name, auch unscharf)
+  let best = null; { const s = asphaltSorte(t); if (s) best = { m: [s.mat, s.matnr, s.einh, 'Asphalt'], s: 90 } } const ohneSD = P && (P.chips || P.nurProfil || P.nurMat);
+  if (!ohneSD) for (const m of SD.mat) {
+    if (m[1] && /^\d{4,}$/.test(m[1]) && new RegExp('\\b' + m[1] + '\\b').test(t)) { best = { m, s: 100 }; break }
+    const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length >= 8 && flat.includes(n) && (!best || n.length > best.s)) best = { m, s: n.length };
   }
-  if (!best) {   // unscharf suchen (OCR-Lesefehler wie „Erostschutzkies“)
-    const lev = (a, b, max) => { let prev = Array.from({ length: b.length + 1 }, (_, i) => i); for (let i = 1; i <= a.length; i++) { const cur = [i]; let mn = i; for (let j = 1; j <= b.length; j++) { cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); if (cur[j] < mn) mn = cur[j] } if (mn > max) return max + 1; prev = cur } return prev[b.length] };
-    for (const m of SD.mat) {
-      const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length < 6) continue; const max = Math.max(1, Math.floor(n.length * 0.15));
-      for (let i = 0; i + n.length <= flat.length + 1; i++) { if (flat[i] !== n[0] && flat[i + 1] !== n[1]) continue; const d = lev(flat.substr(i, n.length), n, max); if (d <= max && (!best || n.length - d > best.s)) { best = { m, s: n.length - d }; break } }
-    }
+  if (!best && !ohneSD) for (const m of SD.mat) {
+    const n = m[0].toLowerCase().replace(/\s+/g, ''); if (n.length < 8) continue; const max = Math.max(1, Math.floor(n.length * 0.15));
+    for (let i = 0; i + n.length <= flat.length + 1; i++) { if (flat[i] !== n[0] && flat[i + 1] !== n[1]) continue; const d = levD(flat.substr(i, n.length), n, max); if (d <= max && (!best || n.length - d > best.s)) { best = { m, s: n.length - d }; break } }
   }
-  if (best) { out.mat = best.m[0]; out.matnr = best.m[1]; out.einh = best.m[2]; if (!out.lief && ['MKB', 'BSR'].includes(best.m[3])) out.lief = best.m[3] }
-  // Lieferschein-Nr.
-  const lsRe = [/(?:liefer\s*-?\s*schein|wiege\s*-?\s*schein|beleg)\s*-?\s*(?:nr|nummer|no)?\.?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-\/]{2,})/i, /\b(\d{2}-\d{2}-\d{4,6})\b/, /\bLS\s*-?\s*(?:Nr\.?)?\s*[:#]?\s*(\d{4,})/i, /\bNr\.?\s*[:#]?\s*(\d{5,})/i];
-  for (const re of lsRe) { const m = t.match(re); if (m && /\d/.test(m[1])) { out.ls = m[1].replace(/[.,;:]$/, ''); break } }
-  // Menge: Netto bevorzugt, sonst Brutto - Tara, sonst "Menge"
-  const N = '(\\d{1,3}(?:[.\\s]\\d{3})+(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
-  const grab = w => { const m = t.match(new RegExp(w + '[^\\d\\n]{0,25}' + N + '\\s*(kg|t|to|tonnen|m3|m³|stk)?', 'i')); return m ? { v: zahlDe(m[1]), u: (m[2] || '').toLowerCase() } : null };
-  let q = grab('netto(?:\\s*-?\\s*gewicht)?') || grab('menge') || grab('ladegewicht');
-  if (!q) { const b = grab('brutto'), ta = grab('tara'); if (b && ta && b.v > ta.v) q = { v: b.v - ta.v, u: b.u || ta.u } }
-  if (q && isFinite(q.v) && q.v > 0) {
-    let v = q.v; const einh = out.einh || 'to';
-    if (q.u === 'kg' || (!q.u && v > 200 && einh === 'to')) v = v / 1000;
-    out.menge = Math.round(v * 100) / 100;
+  // Gelernte Materialien dieses Lieferanten im Text?
+  if (!best && out.lief) { const lm = lernMat(out.lief).find(n => n.length >= 5 && flat.includes(n.toLowerCase().replace(/\s+/g, ''))); if (lm) { const sm = SD.mat.find(x => x[0] === lm); best = { m: sm || [lm, '', (LERN.lief[out.lief] || {}).einh || '', ''], s: 50 } } }
+  if (best) { out.mat = best.m[0]; out.matnr = best.m[1]; out.einh = best.m[2]; if ((!out.lief || out.liefNeu) && ['MKB', 'BSR'].includes(best.m[3])) { out.lief = best.m[3]; out.liefNeu = false } }
+  // allgemeine Regeln
+  const g = generischLesen(t);
+  if (g.ls) out.ls = g.ls; else { const x = t.match(/\b(\d{2}-\d{2}-\d{4,6})\b/); if (x) out.ls = x[1] }
+  if (g.menge != null) out.menge = g.menge;
+  if (!out.mat && g.mat) out.mat = g.mat;
+  if (g.einh && !out.einh) out.einh = g.einh;
+  if (g.miete) { out.miete = true; out.einh = 'Std'; out.profilName = 'Rapport / Regie (Miete)'; if (g.mat) out.mat = g.mat; else if (best && !MIETE.includes(out.mat)) delete out.mat; if (g.menge == null) delete out.menge }
+  // Lieferanten-Regeln haben Vorrang
+  if (P) {
+    out.profil = P.id; out.profilName = P.name; out.miete = !!P.miete;
+    const o = P.lese(t);
+    if (P.nurProfil) { delete out.ls; delete out.menge; delete out.mat }
+    for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'pos']) if (o[k] != null && o[k] !== '') out[k] = o[k];
+    if (P.miete) { out.einh = 'Std'; if (!o.mat) delete out.mat; if (o.menge == null) delete out.menge; out.matnr = '' }
+    else if (!out.einh) out.einh = o.einh || P.einh;
+    if (o.mat && !o.matnr) { const sm = SD.mat.find(x => x[0].toLowerCase() === String(o.mat).toLowerCase()); out.matnr = sm ? sm[1] : ''; if (sm) out.einh = o.einh || sm[2] }
   }
+  // Gelerntes je Lieferant: Einheit / Miete
+  const L = out.lief && LERN.lief[out.lief];
+  if (L) { if (!out.einh && L.einh) out.einh = L.einh; if (!P && L.miete > L.n / 2) { out.miete = true; out.einh = 'Std' } }
   const dm = t.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
   ['ls', 'menge', 'mat', 'lief'].forEach(k => { if (out[k] != null && out[k] !== '') out.felder.push(k) });
   return out;
 }
-// Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag
+// Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag (bei mehreren Positionen mehrere Einträge)
 async function scanLieferscheine(files, zielId) {
   const r = S.r; let erkannt = 0;
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
-    overlay(`<div class="spin"></div><b>Lieferschein ${files.length > 1 ? (i + 1) + ' von ' + files.length + ' ' : ''}wird gelesen …</b><p class="small" id="ocrp">Texterkennung wird gestartet${ocrWorker ? '' : ' (beim ersten Mal ca. 10 Sek.)'}</p>`);
+    overlay(`<div class="spin"></div><b>Lieferschein ${files.length > 1 ? (i + 1) + ' von ' + files.length + ' ' : ''}wird gelesen …</b><p class="small" id="ocrp">Texterkennung wird gestartet${ocrWorker ? '' : ' (beim ersten Mal ca. 10 Sek.)'}</p><p class="small">Gedrehte Fotos werden automatisch erkannt.</p>`);
     let m = zielId ? r.material.find(x => x.id === zielId) : null;
     if (!m) { const l = r.material[r.material.length - 1]; m = { id: uid(), ap: l ? l.ap : r.aps[0].id, lief: '', mat: '', matnr: '', einh: '', ls: '', menge: '', fotos: [] }; r.material.push(m) }
     try {
       m.fotos.push(await fotoKomprimieren(f));
-      const w = await ocrInit(p => { const e = $('#ocrp'); if (e) e.textContent = 'Texterkennung ' + Math.round(p * 100) + ' %' });
-      const bild = await ocrBild(f);
-      await w.setParameters({ tessedit_pageseg_mode: '3' });
-      const { data } = await w.recognize(bild);
-      let res = parseLieferschein(data.text || '');
-      if (!res.ls || !res.mat || !res.menge) {   // zweiter Durchgang: verstreuter Text (Tabellen, Kästen)
-        const e = $('#ocrp'); if (e) e.textContent = 'Zweiter Durchgang …';
-        await w.setParameters({ tessedit_pageseg_mode: '4' });
-        const d2 = (await w.recognize(bild)).data; data.text = (data.text || '') + '\n' + (d2.text || '');
-        const r2 = parseLieferschein(data.text); for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'lief', 'datum']) if (res[k] == null || res[k] === '') res[k] = r2[k]; res.felder = r2.felder;
-      }
+      const { text, res } = await ocrLesen(f, s => { const e = $('#ocrp'); if (e) e.textContent = s });
       const auto = [];
+      if (res.miete && !res.ls) res.ls = 'Regie ' + dShort(res.datum || r.datum, '.');
       if (res.ls && !m.ls) { m.ls = res.ls; auto.push('ls') }
       if (res.menge && !num(m.menge)) { m.menge = res.menge; auto.push('menge') }
-      if (res.mat && !m.mat) { m.mat = res.mat; m.matnr = res.matnr || ''; m.einh = res.einh || ''; auto.push('mat') }
+      if (res.mat && !m.mat) { m.mat = res.mat; m.matnr = res.matnr || ''; auto.push('mat') }
+      if (res.einh && (!m.einh || res.miete)) m.einh = res.einh;
       if (res.lief && !m.lief) { m.lief = res.lief; auto.push('lief') }
-      // nicht erkannt: Lieferant/Material vom vorherigen Lieferschein übernehmen (meist gleiche Fuhre)
-      const prev = r.material.filter(x => x.id !== m.id && x.mat).pop();
-      if (prev && !m.mat) { m.mat = prev.mat; m.matnr = prev.matnr; m.einh = prev.einh; auto.push('mat~') }
-      if (prev && !m.lief) { m.lief = prev.lief; auto.push('lief~') }
-      m.ocr = { auto, text: (data.text || '').slice(0, 1500), datum: res.datum || '' };
+      const prev = r.material.filter(x => x.id !== m.id && x.mat && x.lief === m.lief).pop();
+      if (prev && !m.mat && !res.miete) { m.mat = prev.mat; m.matnr = prev.matnr; m.einh = prev.einh; auto.push('mat~') }
+      const lm = m.lief ? lernMat(m.lief) : [];
+      if (!m.mat && !res.miete && lm.length) { const sm = SD.mat.find(x => x[0] === lm[0]); m.mat = lm[0]; m.matnr = sm ? sm[1] : ''; if (!m.einh) m.einh = (LERN.lief[m.lief] || {}).einh || (sm ? sm[2] : ''); auto.push('mat^') }
+      if (!m.lief) { const p2 = r.material.filter(x => x.id !== m.id && x.lief).pop(); if (p2) { m.lief = p2.lief; auto.push('lief~') } }
+      const P = LS_PROFILE.find(p => p.id === res.profil);
+      const chips = P && P.chips ? P.chips() : res.miete ? mietChips() : lm.length > 1 ? lm.slice(0, 6).map(n => { const sm = SD.mat.find(x => x[0] === n); return [n, n, sm ? sm[2] : ((LERN.lief[m.lief] || {}).einh || '')] }) : null;
+      m.ocr = { auto, text: text.slice(0, 2500), datum: res.datum || '', profil: res.profilName || (res.gelernt ? m.lief + ' (gelernt)' : res.liefNeu ? 'Neuer Lieferant: ' + res.lief : ''), chips, miete: !!res.miete, kopf: res.kopf || '', liefNeu: !!res.liefNeu };
+      // weitere Positionen (z. B. Muffenrohr) als eigene Einträge, Foto nur beim ersten
+      (res.pos || []).slice(1).forEach(ps => r.material.push({ id: uid(), ap: m.ap, lief: m.lief, mat: ps.mat, matnr: ps.matnr || '', einh: ps.einh || '', ls: m.ls, menge: ps.menge, fotos: [], ocr: { auto: ['mat', 'menge', 'ls'], text: '', datum: res.datum || '', profil: (res.profilName || '') + ' – weitere Position', chips: null } }));
       if (res.felder.length) erkannt++;
     } catch (e) { console.error(e); m.ocr = { auto: [], text: '', fehler: String(e.message || e) } }
     zielId = null; saveDraft();
   }
   closeOverlay(); render();
-  toast(erkannt ? `${erkannt} von ${files.length} Lieferschein(en) erkannt – bitte gelb markierte Felder prüfen` : 'Text nicht sicher erkannt – bitte Felder ausfüllen', 4000);
+  toast(erkannt ? `${erkannt} von ${files.length} Lieferschein(en) erkannt – gelb markierte Felder bitte prüfen` : 'Text nicht sicher erkannt – bitte Felder ausfüllen', 4000);
 }
 async function fotoKomprimieren(f) {
   const bmp = await createImageBitmap(f); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   return c.toDataURL('image/jpeg', 0.72);
 }
-// OCR-Dateien im Hintergrund vorladen, damit es auf der Baustelle offline geht
-function ocrVorladen() { if (!navigator.onLine) return; ['worker.min.js', 'deu.traineddata.gz', (typeof WebAssembly === 'object' ? 'tesseract-core-simd-lstm.wasm.js' : ''), 'tesseract-core-lstm.wasm.js'].filter(Boolean).forEach(f => fetch('vendor/tesseract/' + f).catch(() => { })) }
+function ocrVorladen() { if (!navigator.onLine) return; ['worker.min.js', 'deu.traineddata.gz', 'tesseract-core-simd-lstm.wasm.js', 'tesseract-core-lstm.wasm.js'].forEach(f => fetch('vendor/tesseract/' + f).catch(() => { })) }
 
 // ---------------------------------------------------------------- Vorlage aus älterem Bericht
+// Stunden aus einem anderen Bericht auf die Arbeitspakete des aktuellen Berichts übertragen (gleiche AP-Nr., sonst gleiche Position)
+function stundenUebertragen(hAlt, apsAlt, apsNeu) {
+  const out = {};
+  Object.entries(hAlt || {}).forEach(([id, v]) => {
+    if (!num(v)) return; const i = apsAlt.findIndex(a => a.id === id); if (i < 0) return;
+    const ziel = apsNeu.find(a => a.nr && a.nr === apsAlt[i].nr) || apsNeu[i] || apsNeu[apsNeu.length - 1];
+    if (ziel) out[ziel.id] = (out[ziel.id] || 0) + num(v);
+  });
+  return out;
+}
 function vorlageAus(h, nurKolonne) {
   h = clone(h);
   if (nurKolonne) {
     const r = S.r; let n = 0;
-    h.personal.forEach(p => { if (!r.personal.some(x => x.name === p.name)) { r.personal.push({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} }); n++ } });
-    h.geraete.forEach(g => { if (!r.geraete.some(x => x.name === g.name)) r.geraete.push({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} }) });
-    saveDraft(); render(); toast(`${n} Mitarbeiter und ${h.geraete.length} Geräte übernommen`); return;
+    h.personal.forEach(p => { if (!r.personal.some(x => x.name === p.name)) { r.personal.push({ id: uid(), name: p.name, nr: p.nr, zus: '', h: p.zus ? {} : stundenUebertragen(p.h, h.aps, r.aps), neu: p.neu }); n++ } });
+    h.geraete.forEach(g => { if (!r.geraete.some(x => x.name === g.name)) r.geraete.push({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: stundenUebertragen(g.h, h.aps, r.aps) }) });
+    saveDraft(); render(); toast(`${n} Mitarbeiter und ${h.geraete.length} Geräte mit Stunden übernommen – bitte prüfen`, 4000); return;
   }
   const n = neuerBericht();
   Object.assign(n, { baunr: h.baunr, baustelle: h.baustelle, bauteil: h.bauteil, bauherr: h.bauherr, beginn: h.beginn, ende: h.ende, pause: h.pause,
-    aps: h.aps.map(a => ({ id: a.id, nr: a.nr, text: a.text })), personal: h.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} })), geraete: h.geraete.map(g => ({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} })) });
+    aps: h.aps.map(a => ({ id: a.id, nr: a.nr, text: a.text })),
+    personal: h.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: p.zus ? {} : Object.assign({}, p.h), neu: p.neu })),
+    geraete: h.geraete.map(g => ({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: Object.assign({}, g.h) })) });
   S.r = n; S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0);
-  toast(`Vorlage ${h.baunr} vom ${dateDe(h.datum)}: Baustelle, Pakete, Kolonne und Geräte übernommen – Stunden neu eintragen`, 4000);
+  toast(`Vorlage ${h.baunr} vom ${dateDe(h.datum)}: Baustelle, Pakete, Kolonne, Geräte und Stunden übernommen – bitte prüfen`, 4500);
 }
 function histPicker(titel, cb) {
   const el = document.createElement('div'); el.className = 'sheet';
@@ -564,7 +778,7 @@ function telAblauf() {
     }
     return true;
   });
-  q('stdfertig', () => { if (!r.aps.length || !r.personal.length) return ''; if (!TEL.split) TEL.split = { [r.aps[0].id]: 1 }; if (TEL.std == null) TEL.std = dauer(r); const last = r.aps[r.aps.length - 1]; if (r.aps.length > 1) { const used = r.aps.slice(0, -1).reduce((s, a) => s + (TEL.split[a.id] || 0), 0); TEL.split[last.id] = Math.max(0, dauer(r) - used) } r.personal.forEach(p => { if (!p.zus) p.h = verteilen(r, TEL.std) }); return `${r.aps.length > 1 ? 'Rest auf AP ' + last.nr + '. ' : ''}Hat jemand abweichende Stunden? Zum Beispiel: Segmehl 8 Stunden. Sonst nein.` }, a => {
+  q('stdfertig', () => { if (!r.aps.length || !r.personal.length) return ''; if (!TEL.split) TEL.split = { [r.aps[0].id]: 1 }; if (TEL.std == null) TEL.std = dauer(r); const last = r.aps[r.aps.length - 1]; if (r.aps.length > 1) { const used = r.aps.slice(0, -1).reduce((s, a) => s + (TEL.split[a.id] || 0), 0); TEL.split[last.id] = Math.max(0, dauer(r) - used) } r.personal.forEach(p => { if (!p.zus) p.h = verteilen(r, TEL.std) }); return `${r.aps.length > 1 ? 'Rest auf AP ' + last.nr + '. ' : ''}Hat jemand abweichende Stunden? Zum Beispiel: Mustermann 8 Stunden. Sonst nein.` }, a => {
     if (nein(a)) return true; const p = personenAus(a), h = stunden(a.replace(/^[^\d]*?(?=\d|ein|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf)/i, ''));
     if (!p.length || h == null) return 'Bitte Name und Stunden, oder nein.';
     p.forEach(m => { const x = r.personal.find(y => y.name === m[0]); if (x) { x.zus = ''; x.h = verteilen(r, h) } });
@@ -716,9 +930,15 @@ function zeitRows(r, a, b, c) {
     `<td class="g sm" style="padding:0 1px;font-size:8px">Beginn:</td><td class="g sm">Ende:</td><td class="g sm">Pausen:</td><td colspan="3" class="g">Dauer:</td>${b}`,
     `<td class="bi c">${r.beginn}</td><td class="bi c">${r.ende}</td><td class="bi c">${r.pause}</td><td colspan="3" class="bi c">${dauerTxt(r)}</td>${c}`];
 }
+// Lieferscheine gesammelt: je Arbeitspaket, dann Lieferant, dann Material (Reihenfolge des ersten Auftretens)
+function materialSortiert(r) {
+  const pos = (arr, k) => { const i = arr.indexOf(k); return i < 0 ? 999 : i };
+  const L = [...new Set(r.material.map(m => m.lief))], M = [...new Set(r.material.map(m => m.mat))];
+  return r.material.map((m, i) => [m, i]).sort((a, b) => (r.aps.findIndex(x => x.id === a[0].ap) - r.aps.findIndex(x => x.id === b[0].ap)) || (pos(L, a[0].lief) - pos(L, b[0].lief)) || (pos(M, a[0].mat) - pos(M, b[0].mat)) || (a[1] - b[1])).map(x => x[0]);
+}
 function matLines(r) {
   const L = [], aps = r.aps, multi = new Set(r.material.map(m => m.ap)).size > 1; let la = null, ll = null, lm = null;
-  r.material.slice().sort((x, y) => aps.findIndex(a => a.id === x.ap) - aps.findIndex(a => a.id === y.ap)).forEach(m => {
+  materialSortiert(r).forEach(m => {
     if (multi && m.ap !== la) { const a = aps.find(a => a.id === m.ap); L.push({ t: 'AP ' + (a && a.nr || '?'), cls: 'g' }); la = m.ap; ll = lm = null }
     if (m.lief !== ll) { L.push({ t: '---' + m.lief + '---' }); ll = m.lief; lm = null }
     if (m.mat !== lm) { L.push({ t: m.mat + (m.einh ? ' [' + m.einh + ']' : '') }); lm = m.mat }
@@ -882,15 +1102,26 @@ async function pdfErzeugen(r, art) {
   }
   return pdf.output('blob');
 }
+let VORLAGE = null, LOGO_DATA = null;
+async function excelErzeugen(r) {   // füllt die Original-Excel-Vorlage (Tagesbericht + Bautagebuch + Blatt „Lohn“)
+  if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
+  if (!LOGO_DATA) LOGO_DATA = await new Promise(async res => { const b = await (await fetch('icons/logo-dark.png')).blob(); const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b) });
+  return new Blob([await excelFuellen(ExcelJS, VORLAGE.slice(0), r, SD, r.sig || null, LOGO_DATA)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
 async function dateienErzeugen(r) {
   const base = `${r.baunr || 'ohneNr'}-%-${yymmdd(r.datum)}`, d = berichtDaten(r);
-  return [
+  d.bericht_app = Object.assign(clone(r), { material: r.material.map(m => Object.assign({}, m, { fotos: [], ocr: undefined })) });   // für die Excel-Erzeugung im Büro
+  const files = [
     new File([await pdfErzeugen(r, 'tb')], base.replace('%', 'TB') + '.pdf', { type: 'application/pdf' }),
-    new File([await pdfErzeugen(r, 'btb')], base.replace('%', 'BTB') + '.pdf', { type: 'application/pdf' }),
-    new File([lohnCsv(d)], base.replace('%', 'LOHN') + '.csv', { type: 'text/csv' }),
-    new File([JSON.stringify(d, null, 1)], base.replace('%', 'DATEN') + '.txt', { type: 'text/plain' })
+    new File([await pdfErzeugen(r, 'btb')], base.replace('%', 'BTB') + '.pdf', { type: 'application/pdf' })
   ];
+  try { files.push(new File([await excelErzeugen(r)], base.replace('%', 'TB-BTB') + '.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })) } catch (e) { console.error('Excel', e) }
+  files.push(new File([JSON.stringify(d, null, 1)], base.replace('%', 'DATEN') + '.txt', { type: 'text/plain' }));
+  return files;
 }
+const teilbar = files => !!(navigator.canShare && navigator.canShare({ files }));
+// manche Android-Handys dürfen Excel-Dateien nicht über „Teilen“ weitergeben → dann ohne Excel teilen (Büro erzeugt sie aus der DATEN-Datei)
+function teilDateien(files) { if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
 const betreff = r => `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
 const mailText = r => `Betreff: ${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
@@ -906,17 +1137,18 @@ async function prepare(r) {
   } catch (e) { console.error(e); overlay(`<b>Fehler beim Erstellen</b><p class="small">${esc(e.message || e)}</p><button class="btn full" data-act="ovclose">Schließen</button>`) }
 }
 function zeigeVersand(hinweis = '') {
-  const { r, files } = S.prepared, kann = !!(navigator.canShare && navigator.canShare({ files }));
+  const { r, files } = S.prepared, td = teilDateien(files), kann = !!td.files;
   overlay(`<b style="font-size:18px">Bericht ist fertig ✓</b>${hinweis}
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
   ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b><br>Der Betreff wird mitgegeben. Falls das Betreff-Feld leer bleibt: lange hineintippen → <b>Einsetzen</b> (er ist schon kopiert).</p>
+    ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Hinweis: Dieses Handy kann die Excel-Datei nicht anhängen. Das Büro erzeugt sie aus der DATEN-Datei (siehe Anleitung).</p>' : ''}
     <button class="btn orange full big" data-act="share">📤 Senden</button>`
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
 async function share() {
-  const { r, files } = S.prepared;
+  const { r } = S.prepared, files = teilDateien(S.prepared.files).files;
   try { await navigator.clipboard.writeText(betreff(r)) } catch (e) { }
   try { await navigator.share({ files, title: betreff(r), text: mailText(r) }); await abgeschlossen('mail') }
   catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich: ' + e.message); }
@@ -950,7 +1182,7 @@ async function sendQueue(silent) {
 }
 const kurz = r => ({ id: r.id, datum: r.datum, baunr: r.baunr, baustelle: r.baustelle, aps: r.aps.map(a => ({ nr: a.nr, text: a.text })) });
 async function abgeschlossen(weg, wartet) {
-  const r = S.prepared.r;
+  const r = S.prepared.r; try { lernen(r) } catch (e) { }
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
   HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
   await DB.set('history', HIST); await DB.del('draft'); S.r = null; S.prepared = null;
@@ -973,11 +1205,12 @@ document.addEventListener('click', async e => {
   if (ds.zus) { const [id, z] = ds.zus.split('|'); const p = r.personal.find(x => x.id === id); p.zus = p.zus === z ? '' : z; saveDraft(); render(); return }
   if (ds.st) { const [k, id, ap, dv] = ds.st.split('|'); const it = r[k].find(x => x.id === id); it.h[ap] = Math.max(0, num(it.h[ap]) + num(dv)); saveDraft(); render(); return }
   if (ds.vorlage) { const h = HIST.find(x => x.id === ds.vorlage); if (h) vorlageMitPruefung(h); return }
+  if (ds.matchip) { const [id, i] = ds.matchip.split('|'); const m = r.material.find(x => x.id === id); const c = m.ocr.chips[+i]; m.mat = c[1]; m.einh = c[2]; const sm = SD.mat.find(x => x[0] === c[1]); m.matnr = sm ? sm[1] : ''; m.ocr.auto = m.ocr.auto.filter(f => !f.startsWith('mat')); saveDraft(); render(); return }
   if (ds.resend) { const h = HIST.find(x => x.id === ds.resend); if (h) prepare(clone(h)); return }
   if (ds.pick) {
     const [k, id] = ds.pick.split('|');
     if (k === 'von') openPicker('polier', m => { r.von = m[0] });
-    if (k === 'lief') openPicker('lief', l => { const x = r.material.find(x => x.id === id); x.lief = l[0]; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('lief')) });
+    if (k === 'lief') openPicker('lief', l => { const x = r.material.find(x => x.id === id); x.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('lief')) });
     if (k === 'mat') openPicker('mat', m => { const x = r.material.find(x => x.id === id); x.mat = m[0]; x.matnr = m[1] || ''; x.einh = m[2] || ''; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('mat')); if (!x.lief && ['MKB', 'BSR'].includes(m[3])) x.lief = m[3] });
     return;
   }
@@ -1002,12 +1235,7 @@ document.addEventListener('click', async e => {
   if (a === 'addge') openPicker('ge', (g, add) => { if (add) r.geraete.push({ id: uid(), name: g[0], nr: g[1], ks: g[2], firma: '', h: {} }); else r.geraete = r.geraete.filter(x => x.name !== g[0]) }, r.geraete.map(g => g.name));
   if (a === 'addmat') { r.material.push({ id: uid(), ap: r.aps[0].id, lief: '', mat: '', matnr: '', einh: '', ls: '', menge: '', fotos: [] }); saveDraft(); render() }
   if (a === 'dupmat') { const l = r.material[r.material.length - 1]; r.material.push({ id: uid(), ap: l.ap, lief: l.lief, mat: l.mat, matnr: l.matnr, einh: l.einh, ls: '', menge: '', fotos: [] }); saveDraft(); render(); setTimeout(() => { const i = document.querySelectorAll('[data-k=ls]'); i[i.length - 1].focus() }, 50) }
-  if (a === 'kolonne') {
-    const h = HIST[0]; if (!h) { toast('Noch kein früherer Bericht vorhanden'); return }
-    h.personal.forEach(p => { if (!r.personal.some(x => x.name === p.name)) r.personal.push({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} }) });
-    h.geraete.forEach(g => { if (!r.geraete.some(x => x.name === g.name)) r.geraete.push({ id: uid(), name: g.name, nr: g.nr, ks: g.ks, firma: g.firma || '', h: {} }) });
-    saveDraft(); toast(`${h.personal.length} Mitarbeiter und ${h.geraete.length} Geräte übernommen`); render();
-  }
+  if (a === 'kolonne') { if (!HIST[0]) { toast('Noch kein früherer Bericht vorhanden'); return } vorlageAus(HIST[0], true) }
   if (a === 'copyh') { const f = r.personal.find(p => !p.zus); if (!f) return; r.personal.forEach(p => { if (!p.zus) p.h = { ...f.h } }); saveDraft(); toast('Stunden von ' + f.name + ' für alle übernommen'); render() }
   if (a === 'sigclear') { r.sig = ''; saveDraft(); render() }
   if (a === 'prepare') {
@@ -1027,7 +1255,8 @@ document.addEventListener('click', async e => {
     if (!SET.email && !SET.uploadUrl) { toast('Bitte E-Mail-Adresse des Büros eintragen'); return }
     await DB.set('settings', SET); toast('Gespeichert ✓'); S.view = 'home'; render();
   }
-  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'history', 'queue', 'stammdaten', 'settings']) await DB.del(k); location.reload() } }
+  if (a === 'lernreset') { if (await bestaetigen('Alles Gelernte zu Lieferscheinen löschen?')) { LERN = { alias: {}, lief: {} }; await DB.set('lernen', LERN); render() } }
+  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'history', 'queue', 'stammdaten', 'settings', 'lernen']) await DB.del(k); location.reload() } }
 });
 function bestaetigen(text) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
 
@@ -1048,7 +1277,7 @@ document.addEventListener('change', async e => {
   const t = e.target, ds = t.dataset;
   if (t.id === 's_file' && t.files[0]) {
     const info = $('#s_info'); info.textContent = 'Wird gelesen …';
-    try { SD = await importStammdaten(t.files[0]); await DB.set('stammdaten', SD); info.innerHTML = `<span class="ok">✓ ${SD.ma.length} Mitarbeiter, ${SD.ge.length} Geräte, ${SD.mat.length} Materialien geladen</span>` }
+    try { SD = sdErgaenzen(await importStammdaten(t.files[0])); await DB.set('stammdaten', SD); info.innerHTML = `<span class="ok">✓ ${SD.ma.length} Mitarbeiter, ${SD.ge.length} Geräte, ${SD.mat.length} Materialien geladen</span>` }
     catch (err) { info.innerHTML = `<span style="color:var(--rot)">${esc(err.message)}</span>` }
     return;
   }

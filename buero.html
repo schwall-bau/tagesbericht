@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schwall Tagesbericht – Büro: Excel aus DATEN-Datei</title>
+<link rel="icon" type="image/png" href="icons/icon-192-v2.png">
+<style>
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f2f2f2;color:#1e1e1c}
+  header{background:#ED7102;padding:14px 20px;display:flex;align-items:center;gap:16px}
+  header img{height:40px} header h1{font-size:18px;margin:0}
+  main{max-width:760px;margin:24px auto;padding:0 16px}
+  .card{background:#fff;border-radius:12px;padding:18px;margin-bottom:14px;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .drop{border:2px dashed #ED7102;border-radius:12px;padding:34px;text-align:center;background:#fff8f1;cursor:pointer}
+  .drop.on{background:#ffe9d4}
+  .it{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid #eee;font-size:14px}
+  .ok{color:#2e7d32;font-weight:700}.err{color:#c62828;font-weight:700}
+  small{color:#666}
+</style>
+</head>
+<body>
+<header><img src="icons/logo-header.png" alt="Schwall"><h1>Büro: Excel-Tagesbericht aus DATEN-Datei erzeugen</h1></header>
+<main>
+  <div class="card">
+    <p>Jede Bericht-Mail der App enthält die Datei <b>…-DATEN-….txt</b>. Daraus entsteht hier die Excel-Datei im gewohnten
+    Formular (Tagesbericht + Bautagebuch + Blatt „Lohn“), z. B. wenn ein Android-Handy die Excel nicht mitschicken konnte.</p>
+    <label class="drop" id="drop">📂 DATEN-Datei(en) hier ablegen oder klicken<input type="file" id="f" accept=".txt,.json" multiple hidden></label>
+    <p><small>Alles läuft nur in diesem Browser – es wird nichts hochgeladen.</small></p>
+  </div>
+  <div class="card" id="out" hidden></div>
+</main>
+<script src="vendor/exceljs.min.js"></script>
+<script src="excel.js"></script>
+<script>
+let VORLAGE = null, LOGO = null;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// Bericht aus der DATEN-Datei wiederherstellen (neue Dateien enthalten ihn komplett, ältere werden umgebaut)
+function berichtAus(d) {
+  if (d.bericht_app) return d.bericht_app;
+  const id = nr => 'ap_' + nr, aps = (d.arbeitspakete || []).map(a => ({ id: id(a.ap), nr: a.ap, text: a.beschreibung }));
+  const h = list => Object.fromEntries((list || []).map(s => [id(s.ap), s.std]));
+  const hm = s => { const m = Math.round((s || 0) * 60); return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') };
+  return { datum: d.datum, von: d.polier, baustelle: d.baustelle, bauteil: d.bauteil, baunr: d.baustelle_nr, bauherr: d.bauherr, wetter: d.wetter, temp: d.temperatur ?? '', wasser: d.wasserstand,
+    beginn: d.beginn, ende: d.ende, pause: hm(d.pause_std), bem: d.bemerkungen, vork: d.vorkommnisse, aps,
+    personal: (d.personal || []).map(p => ({ name: p.name, nr: p.persnr, zus: p.kuerzel, h: h(p.stunden) })),
+    geraete: (d.geraete || []).map(g => ({ name: g.bezeichnung, nr: g.artikel, ks: g.kostenstelle, firma: g.mietfirma, h: h(g.stunden) })),
+    material: (d.material || []).map(m => ({ ap: id(m.ap), lief: m.lieferant, mat: m.material, matnr: m.materialnr, einh: m.einheit, ls: m.lieferschein, menge: m.menge })), sig: '' };
+}
+async function verarbeiten(files) {
+  const out = document.getElementById('out'); out.hidden = false; out.innerHTML = '<b>Ergebnis</b>';
+  if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
+  if (!LOGO) LOGO = await new Promise(async res => { const bl = await (await fetch('icons/logo-dark.png')).blob(); const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(bl) });
+  for (const f of files) {
+    const row = document.createElement('div'); row.className = 'it'; row.innerHTML = `<span>${esc(f.name)}</span><span>wird erzeugt …</span>`; out.appendChild(row);
+    try {
+      const d = JSON.parse(await f.text()); if (d.format !== 'schwall-tagesbericht') throw new Error('keine DATEN-Datei der Tagesbericht-App');
+      const r = berichtAus(d);
+      const buf = await excelFuellen(ExcelJS, VORLAGE.slice(0), r, null, r.sig || null, LOGO);
+      const name = `${r.baunr || 'ohneNr'}-TB-BTB-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
+      const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      row.lastElementChild.innerHTML = `<a href="${url}" download="${esc(name)}" class="ok">✓ ${esc(name)}</a>`;
+    } catch (e) { row.lastElementChild.innerHTML = `<span class="err">${esc(e.message)}</span>` }
+  }
+}
+const drop = document.getElementById('drop'), inp = document.getElementById('f');
+inp.onchange = () => verarbeiten([...inp.files]);
+['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('on') }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('on') }));
+drop.addEventListener('drop', e => verarbeiten([...e.dataTransfer.files]));
+</script>
+</body>
+</html>

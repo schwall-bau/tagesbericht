@@ -1,10 +1,10 @@
 // Service Worker: macht die App offline nutzbar (Baustelle ohne Netz).
 // Bei jeder neuen Version VERSION erhöhen, damit die Handys das Update laden.
-const VERSION = 'tb-1.3.0';
+const VERSION = 'tb-1.8.0';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest',
-  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js',
-  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/logo-header.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
+  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js', 'vendor/exceljs.min.js', 'excel.js', 'vorlage-tagesbericht.xlsx', 'buero.html',
+  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/logo-header.png', 'icons/icon-192-v2.png', 'icons/icon-512-v2.png', 'icons/apple-touch-icon-v2.png'
 ];
 
 self.addEventListener('install', e => {
