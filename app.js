@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.14.1';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -1427,7 +1427,8 @@ async function dateienErzeugen(r) {
 }
 const teilbar = files => !!(navigator.canShare && navigator.canShare({ files }));
 // manche Android-Handys dürfen Excel-Dateien nicht über „Teilen“ weitergeben → dann ohne Excel teilen (Büro erzeugt sie aus der DATEN-Datei)
-function teilDateien(files) { if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
+// Chrome/Android meldet „teilbar“, lehnt Excel beim eigentlichen Teilen aber ab („Permission denied“) → dort Excel gleich weglassen; nur iPhone/iPad gibt Excel weiter
+function teilDateien(files) { if (!isIOS()) { const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: ohne.length < files.length } : { files: null, ohneExcel: false } } if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
 const betreff = r => r.typ === 'sl' ? `Stundenlohnbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}` : `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
 const mailText = r => r.typ === 'sl' ? `${betreff(r)}\n\nStundenlohnbericht (PDF mit Lieferscheinen als Anlage, Excel)\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nAuftrag durch: ${r.auftrag || '–'}\nPolier: ${r.von}\nPersonal: ${r.personal.length} (${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h) · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n${r.sigAG ? 'Vom Auftraggeber unterschrieben' + (r.agName ? ' (' + r.agName + ')' : '') : 'Noch nicht vom Auftraggeber unterschrieben'}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)` : `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
@@ -1460,7 +1461,7 @@ function zeigeVersand(hinweis = '') {
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
   ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b><br>Der Betreff wird mitgegeben. Falls das Betreff-Feld leer bleibt: lange hineintippen → <b>Einsetzen</b> (er ist schon kopiert).</p>
-    ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Hinweis: Dieses Handy kann die Excel-Datei nicht anhängen. Das Büro erzeugt sie aus der DATEN-Datei (siehe Anleitung).</p>' : ''}
+    ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Android gibt Excel-Dateien beim Teilen nicht weiter – angehängt werden beide PDFs und die DATEN-Datei. Das Büro erzeugt die Excel daraus (buero.html).</p>' : ''}
     <button class="btn orange full big" data-act="share">📤 Senden</button>
     <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>`
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
