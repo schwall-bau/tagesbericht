@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -43,10 +43,13 @@ let SD = null;            // Stammdaten
 let SET = { polier: '', email: '', uploadUrl: '' };
 let HIST = [];            // gesendete Berichte (ohne Dateien)
 let QUEUE = [];           // Upload-Warteschlange (nur Direktversand)
-const S = { view: 'home', step: 0, r: null, doc: 'tb', prepared: null };
+const S = { view: 'home', step: 0, r: null, doc: 'tb', prepared: null, sl: null, tb: null };   // r = gerade bearbeiteter Bericht (Tagesbericht oder Stundenlohn); tb/sl = geparkte Entwürfe
+let SLHIST = [];          // gesendete Stundenlohnberichte
+let BERUF = {};           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
 let saveTimer = null;
-function saveDraft() { clearTimeout(saveTimer); saveTimer = setTimeout(() => { if (S.r) DB.set('draft', S.r) }, 400) }
-const flushDraft = () => { clearTimeout(saveTimer); if (S.r) DB.set('draft', S.r) };
+const draftKey = r => r && r.typ === 'sl' ? 'draft_sl' : 'draft';
+function saveDraft() { clearTimeout(saveTimer); saveTimer = setTimeout(() => { if (S.r) DB.set(draftKey(S.r), S.r) }, 400) }
+const flushDraft = () => { clearTimeout(saveTimer); if (S.r) DB.set(draftKey(S.r), S.r) };
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushDraft() });
 window.addEventListener('pagehide', flushDraft);
 
@@ -89,6 +92,7 @@ async function init() {
   try {
     SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
     LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
+    SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
     HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
   } catch (e) { console.error(e) }
@@ -106,7 +110,9 @@ const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.
 
 // ---------------------------------------------------------------- Rendering
 const STEPS = [['Kopf', '📋'], ['Pakete', '🛣️'], ['Personal', '👷'], ['Geräte', '🚜'], ['Material', '🧾'], ['Abschluss', '✅']];
+const STEPS_SL = [['Kopf', '📋'], ['Arbeiten', '🛠️'], ['Personal', '👷'], ['Geräte', '🚜'], ['Material', '🧾'], ['Abschluss', '✅']];
 function render() {
+  if (S.r && S.r.typ === 'sl' && !['sl', 'erfassung'].includes(S.view)) { S.sl = S.r; S.r = S.tb || null; S.tb = null; S.doc = 'tb' }   // Stundenlohn verlassen → Tagesbericht-Entwurf wieder aktiv
   const hb = $('#hbtn'); hb.style.display = 'none';
   $('#steps').style.display = 'none'; $('#foot').style.display = 'none'; $('#hsub').textContent = '';
   if (S.view === 'telefon') {
@@ -116,17 +122,18 @@ function render() {
   }
   if (S.view === 'erfassung') {
     const r = S.r, res = pruefe(r);
-    $('#htitle').textContent = 'Tagesbericht'; $('#hsub').textContent = (r.datum ? wtag(r.datum) + ', ' + dateDe(r.datum) : '') + (r.baunr ? ' · ' + r.baunr : '');
-    hb.style.display = ''; hb.textContent = '‹ Start'; hb.onclick = () => { S.view = 'home'; render() };
+    const sl = r.typ === 'sl';
+    $('#htitle').textContent = sl ? '⏱️ Stundenlohnbericht' : 'Tagesbericht'; $('#hsub').textContent = (r.datum ? wtag(r.datum) + ', ' + dateDe(r.datum) : '') + (r.baunr ? ' · ' + r.baunr : '');
+    hb.style.display = ''; hb.textContent = sl ? '‹ Zurück' : '‹ Start'; hb.onclick = () => { S.view = sl ? 'sl' : 'home'; render(); scrollTo(0, 0) };
     $('#steps').style.display = 'flex';
-    $('#steps').innerHTML = STEPS.map((s, i) => `<button class="${i === S.step ? 'on' : ''} ${i < S.step && !res.some(x => x.t === 'e' && x.s === i) ? 'done' : ''}" data-step="${i}"><b>${s[1]}</b>${s[0]}</button>`).join('');
-    $('#main').innerHTML = [vKopf, vAps, vPers, vGer, vMat, vAbschluss][S.step]();
+    $('#steps').innerHTML = (sl ? STEPS_SL : STEPS).map((s, i) => `<button class="${i === S.step ? 'on' : ''} ${i < S.step && !res.some(x => x.t === 'e' && x.s === i) ? 'done' : ''}" data-step="${i}"><b>${s[1]}</b>${s[0]}</button>`).join('');
+    $('#main').innerHTML = (sl ? [vKopfSL, vAps, vPers, vGer, vMat, vAbschlussSL] : [vKopf, vAps, vPers, vGer, vMat, vAbschluss])[S.step]();
     $('#foot').style.display = 'flex';
     $('#foot').innerHTML = (S.step > 0 ? `<button class="btn ghost" data-act="prev">‹ Zurück</button>` : '') + (S.step < 5 ? `<button class="btn orange" data-act="next">Weiter ›</button>` : `<button class="btn orange" data-act="prepare">PDF erstellen & senden</button>`);
   } else {
-    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte', lieferscheine: '🧾 Lieferschein-Liste' }[S.view] || 'Tagesbericht';
+    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte', lieferscheine: '🧾 Lieferschein-Liste', sl: '⏱️ Stundenlohnarbeiten' }[S.view] || 'Tagesbericht';
     if (S.view !== 'home' && S.view !== 'setup') { hb.style.display = ''; hb.textContent = '‹ Start'; hb.onclick = () => { S.view = 'home'; render() } }
-    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf, lieferscheine: vLieferscheine })[S.view]();
+    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf, lieferscheine: vLieferscheine, sl: vSLStart })[S.view]();
   }
   fitA4(); initSig();
 }
@@ -142,9 +149,9 @@ function vHome() {
       <div class="row" style="margin-top:8px"><button class="btn ghost" data-act="neu">Neuer Bericht</button><button class="btn danger" data-act="verwerfen">Entwurf löschen</button></div>`
       : `<button class="btn orange full big" data-act="neu">＋ Neuer Tagesbericht</button>`}
     <button class="btn full big" style="margin-top:8px;background:#2b2b2b;flex-direction:column" data-act="telefon">📞 Bericht per Gespräch<br><small style="font-weight:400">Die App fragt, du antwortest mit Sprache</small></button>
-    ${(() => { const h = LSL.filter(e => e.datum === today()); return `<button class="btn ghost full" style="margin-top:8px;flex-direction:column" data-act="lsliste">🧾 Lieferschein-Liste<small style="font-weight:400">${h.length ? 'heute ' + h.length + ' LS · ' + mengenText(h) : 'laufend scannen, Tonnage im Blick'}</small></button>` })()}
     ${HIST.length ? `<button class="btn ghost full" style="margin-top:8px" data-act="vorlage">↺ Wie letzter Bericht (${esc(HIST[0].baunr)} ${dateDe(HIST[0].datum)})</button>` : ''}
     ${HIST.length > 1 ? `<button class="btn ghost full" style="margin-top:8px;border-style:dashed" data-act="vorlagewahl">📚 Älteren Bericht als Vorlage wählen …</button>` : ''}
+    ${(() => { const h = LSL.filter(e => e.datum === today()), sl = S.sl && (S.sl.baustelle || S.sl.personal.length); return `<div class="grid2" style="margin-top:8px"><button class="btn ghost" style="flex-direction:column" data-act="lsliste">🧾 Lieferscheine<small style="font-weight:400">${h.length ? 'heute ' + h.length + ' LS · ' + matSummen(h) : 'Liste, Tonnage'}</small></button><button class="btn ghost" style="flex-direction:column" data-act="slstart">⏱️ Stundenlohn<small style="font-weight:400">${sl ? 'Entwurf ' + esc(S.sl.baunr || '') + ' offen' : 'Berichte, Regie'}</small></button></div>` })()}
   </div>
   <div class="card"><div class="prow"><b>Gesendete Berichte</b><button class="btn small ghost" data-view="verlauf">Alle</button></div>
    <div class="lst">${HIST.slice(0, 5).map(histItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
@@ -196,25 +203,26 @@ function vKopf() {
 }
 function apVorschlaege(r) { const m = new Map(); HIST.filter(x => !r.baunr || x.baunr === r.baunr).forEach(x => (x.aps || []).forEach(a => { if (a.nr && !m.has(a.nr)) m.set(a.nr, a.text) })); return [...m] }
 function vAps() {
-  const r = S.r; return `<h2>Arbeitspakete</h2>
-<p class="hint">Jede Tätigkeit als eigenes Arbeitspaket (max. 7). Die AP-Nr. ist Pflicht.</p>
-${r.aps.map((a, i) => `<div class="card"><div class="prow"><span class="ap-tag">Paket ${i + 1}</span>${r.aps.length > 1 ? `<button class="x" data-delap="${a.id}">✕</button>` : ''}</div>
-<label>Arbeitspaket (AP-Nr.)</label><input list="aplist" data-ap="${a.id}" data-k="nr" value="${esc(a.nr)}" placeholder="z. B. 10 – auswählen oder eintippen">
-<label>Arbeitsbeschreibung</label><textarea data-ap="${a.id}" data-k="text" placeholder="z. B. Planie zum Asphalteinbau hergestellt">${esc(a.text)}</textarea>
+  const r = S.r, sl = r.typ === 'sl'; return `${sl ? `<h2>Ausgeführte Arbeiten</h2>
+<p class="hint">Was wurde im Stundenlohn gemacht? Steht später unter „Kennzeichnung der Arbeit“. AP-Nr. nur, wenn es eine gibt.</p>` : `<h2>Arbeitspakete</h2>
+<p class="hint">Jede Tätigkeit als eigenes Arbeitspaket (max. 7). Die AP-Nr. ist Pflicht.</p>`}
+${r.aps.map((a, i) => `<div class="card"><div class="prow"><span class="ap-tag">${sl ? 'Arbeit' : 'Paket'} ${i + 1}</span>${r.aps.length > 1 ? `<button class="x" data-delap="${a.id}">✕</button>` : ''}</div>
+<label>${sl ? 'AP-Nr. / Position (optional)' : 'Arbeitspaket (AP-Nr.)'}</label><input list="aplist" data-ap="${a.id}" data-k="nr" value="${esc(a.nr)}" placeholder="${sl ? 'optional' : 'z. B. 10 – auswählen oder eintippen'}">
+<label>${sl ? 'Kennzeichnung der Arbeit' : 'Arbeitsbeschreibung'}</label><textarea data-ap="${a.id}" data-k="text" placeholder="${sl ? 'z. B. Lampenmast an der Baustraße abgebaut, Betonplombe entfernt' : 'z. B. Planie zum Asphalteinbau hergestellt'}" ${sl ? 'style="min-height:110px"' : ''}>${esc(a.text)}</textarea>
 <div class="mic">🎤 Mikrofon auf der Handy-Tastatur antippen und sprechen.</div></div>`).join('')}
-${r.aps.length < 7 ? `<button class="btn ghost full" data-act="addap">＋ Weiteres Arbeitspaket</button>` : ''}
+${r.aps.length < 7 ? `<button class="btn ghost full" data-act="addap">＋ ${sl ? 'Weitere Arbeit' : 'Weiteres Arbeitspaket'}</button>` : ''}
 <datalist id="aplist">${apVorschlaege(r).map(([n, t]) => `<option value="${esc(n)}">${esc(t)}</option>`).join('')}</datalist>`;
 }
 const apLbl = (a, i) => `<span class="ap-tag">AP ${esc(a.nr) || '?'}</span><span>${esc(a.text || 'ohne Beschreibung')}</span>`;
 const stepper = (kind, id, ap, val) => `<div class="step"><button data-st="${kind}|${id}|${ap}|-0.25">−</button><input inputmode="decimal" data-hin="${kind}|${id}|${ap}" value="${val ? fmt(val) : ''}" placeholder="0"><button data-st="${kind}|${id}|${ap}|0.25">＋</button></div>`;
 function vPers() {
-  const r = S.r, d = dauer(r); return `<h2>Personal</h2>
+  const r = S.r, d = dauer(r), sl = r.typ === 'sl'; return `<h2>Personal</h2>
 <div class="grid2" style="margin-bottom:6px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne + Stunden vom letzten Bericht</button></div>
 ${HIST.length > 1 ? `<button class="btn ghost small full" style="margin-bottom:10px;border-style:dashed" data-act="kolonnewahl">Kolonne aus älterem Bericht …</button>` : ''}
-${r.personal.length ? `<div class="card" style="background:#f6f6f6"><div class="prow"><div class="hint" style="margin:0">Arbeitszeit lt. Abschluss: <b>${fq(d)} h</b></div><button class="btn small ghost" data-act="copyh">Stunden der 1. Person für alle</button></div></div>` : `<div class="empty">Noch niemand eingetragen.</div>`}
-${r.personal.map(p => { const s = sumH(p); const warn = !p.zus && Math.abs(s - d) > 0.01; return `<div class="card">
+${r.personal.length ? `<div class="card" style="background:#f6f6f6"><div class="prow"><div class="hint" style="margin:0">${sl ? `Stundenlohn gesamt: <b>${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h</b>` : `Arbeitszeit lt. Abschluss: <b>${fq(d)} h</b>`}</div><button class="btn small ghost" data-act="copyh">Stunden der 1. Person für alle</button></div></div>` : `<div class="empty">Noch niemand eingetragen.</div>`}
+${r.personal.map(p => { const s = sumH(p); const warn = !sl && !p.zus && Math.abs(s - d) > 0.01; return `<div class="card">
  <div class="prow"><div><div class="pname">${esc(p.name)}</div>${p.nr || !p.neu ? `<div class="pnr">Pers.-Nr. ${esc(p.nr) || '–'}${p.neu ? '<span class="newp">neu</span>' : ''}</div>` : `<div class="pnr">Neu, nicht in der Liste <span class="newp">neu</span></div><input data-pnr="${p.id}" inputmode="numeric" placeholder="Pers.-Nr. (falls bekannt)" style="margin-top:6px;padding:7px 9px;font-size:15px">`}</div><div style="display:flex;align-items:center"><span class="sum ${warn ? 'warn' : ''}">${p.zus ? esc(p.zus) : fq(s) + ' h'}</span><button class="x" data-del="personal|${p.id}">✕</button></div></div>
- <div class="chips" style="margin:8px 0">${SD.zus.map(z => `<button class="chip zus ${p.zus === z ? 'on' : ''}" data-zus="${p.id}|${z}">${z}</button>`).join('')}</div>
+ ${sl ? `<div class="chips" style="margin:8px 0">${BERUFE.map(b => `<button class="chip ${p.beruf === b ? 'on' : ''}" data-beruf="${p.id}|${b}">${b}</button>`).join('')}</div>` : `<div class="chips" style="margin:8px 0">${SD.zus.map(z => `<button class="chip zus ${p.zus === z ? 'on' : ''}" data-zus="${p.id}|${z}">${z}</button>`).join('')}</div>`}
  ${p.zus ? `<div class="hint">${zusText(p.zus)}: keine Stunden auf Arbeitspakete.</div>` : r.aps.map((a, i) => `<div class="hrow"><div class="lbl">${apLbl(a, i)}</div>${stepper('personal', p.id, a.id, p.h[a.id])}</div>`).join('')}
 </div>` }).join('')}`;
 }
@@ -232,7 +240,7 @@ function vMat() {
 <div class="row"><span class="btn orange fotobtn">📷 Kamera<input type="file" accept="image/*" capture="environment" data-scan="1"></span><span class="btn ghost fotobtn">🖼️ Mehrere aus Galerie<input type="file" accept="image/*" multiple data-scan="1"></span></div></div>
 ${r.material.length ? '' : `<div class="empty">Noch kein Material.</div>`}
 ${r.material.map(m => `<div class="card"><div class="prow"><b>${esc(m.mat) || 'Material wählen'}</b><button class="x" data-del="material|${m.id}">✕</button></div>
- <label>Für Arbeitspaket</label><select data-m="${m.id}" data-k="ap">${r.aps.map((a, i) => `<option value="${a.id}" ${m.ap === a.id ? 'selected' : ''}>AP ${esc(a.nr) || '?'} ${esc((a.text || '').slice(0, 30))}</option>`).join('')}</select>
+ <label>${r.typ === 'sl' ? 'Für Arbeit' : 'Für Arbeitspaket'}</label><select data-m="${m.id}" data-k="ap">${r.aps.map((a, i) => `<option value="${a.id}" ${m.ap === a.id ? 'selected' : ''}>AP ${esc(a.nr) || '?'} ${esc((a.text || '').slice(0, 30))}</option>`).join('')}</select>
  <div class="grid2"><div class="${ocrF(m, 'lief')}"><label>Lieferant</label>${pickBtn('lief|' + m.id, m.lief || 'wählen …')}</div><div class="${ocrF(m, 'mat')}"><label>Material</label>${pickBtn('mat|' + m.id, m.mat || 'wählen …')}</div></div>
  <div class="grid2"><div><label>Lieferschein-Nr.</label><input class="${ocrF(m, 'ls')}" data-m="${m.id}" data-k="ls" value="${esc(m.ls)}" placeholder="43663"></div>
  <div><label>Menge ${m.einh ? '[' + esc(m.einh) + ']' : ''}</label><input class="${ocrF(m, 'menge')}" inputmode="decimal" data-m="${m.id}" data-k="menge" value="${m.menge !== '' && m.menge != null ? fmt(num(m.menge)) : ''}" placeholder="0,00"></div></div>
@@ -256,7 +264,7 @@ function vAbschluss() {
 <h3>Unterschrift Polier</h3><div class="card"><canvas class="sigpad" id="sig"></canvas><div class="prow" style="margin-top:6px"><span class="hint" style="margin:0">Mit dem Finger unterschreiben</span><button class="btn small ghost" data-act="sigclear">Löschen</button></div></div>
 <h3>Vorschau</h3>${docViewer(r)}`;
 }
-function docViewer(r) { return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
+function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
 const pickBtn = (k, label) => `<button class="btn ghost full" style="justify-content:space-between;font-weight:600" data-pick="${k}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span>▾</span></button>`;
 
 const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace(/[~^]/, '') === k) ? 'ocr' : '';
@@ -892,6 +900,7 @@ const lsSpeichern = () => DB.set('lsliste', LSL).catch(() => toast('Speichern fe
 const lsTag = (b, d) => LSL.filter(e => e.baunr === b && e.datum === d).sort((x, y) => x.zeit - y.zeit);
 const EINH_TXT = { to: 't', m3: 'm³', Stk: 'Stk', Std: 'Std' };
 function mengenText(list) { const s = {}; list.forEach(e => { const u = e.einh || 'to'; s[u] = (s[u] || 0) + num(e.menge) }); return Object.entries(s).map(([u, v]) => `${fq(v)} ${EINH_TXT[u] || u}`).join(' + ') || '0,00 t' }
+const matSummen = list => proMaterial(list).map(([k, l]) => (l[0].mat || 'ohne Material') + ' ' + mengenText(l)).join(' · ') || '0,00 t';
 function proMaterial(list) { const g = new Map(); list.forEach(e => { const k = (e.lief || '?') + ' · ' + (e.mat || 'ohne Material'); if (!g.has(k)) g.set(k, []); g.get(k).push(e) }); return [...g] }
 const lsFrei = e => !e.uebernommen;
 function vLieferscheine() {
@@ -905,14 +914,14 @@ function vLieferscheine() {
   <div class="card" style="background:#fff4ea;border:1.5px solid #f6c89a"><b>📷 Lieferschein scannen</b><p class="hint" style="margin:4px 0 8px">Jeden Lieferschein bei Ankunft fotografieren – die Werte landen sofort in der Tabelle.</p>
    <div class="row"><span class="btn orange fotobtn">📷 Kamera<input type="file" accept="image/*" capture="environment" data-lsscan="1"></span><span class="btn ghost fotobtn">🖼️ Mehrere<input type="file" accept="image/*" multiple data-lsscan="1"></span></div>
    <button class="btn ghost small full" style="margin-top:8px" data-act="lshand">＋ Von Hand eintragen</button></div>
-  <div class="card lssum"><div class="prow"><div><div class="small">${wtag(LSV.datum)}, ${dateDe(LSV.datum)}${LSV.baunr ? ' · Baustelle ' + esc(LSV.baunr) : ''}</div><div class="lsbig">${mengenText(tag)}</div><div class="small">${tag.length} Lieferschein(e)</div></div>
-   <div style="text-align:right"><div class="small">Baustelle gesamt</div><b>${mengenText(alle)}</b><div class="small">${alle.length} LS · ${tage.length} Tag(e)</div></div></div>
-   ${proMaterial(tag).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}</span><b>${l.length} × · ${mengenText(l)}</b></div>`).join('')}</div>
+  <div class="card lssum"><div class="small">${wtag(LSV.datum)}, ${dateDe(LSV.datum)}${LSV.baunr ? ' · Baustelle ' + esc(LSV.baunr) : ''} · ${tag.length} Lieferschein(e)</div>
+   ${proMaterial(tag).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}<br><small>${l.length} Lieferschein(e)</small></span><b class="lsbig">${mengenText(l)}</b></div>`).join('') || '<div class="lsbig">0,00 t</div>'}
+   ${alle.length > tag.length ? `<details class="small" style="margin-top:6px"><summary>Baustelle gesamt (${alle.length} LS · ${tage.length} Tage)</summary>${proMaterial(alle).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}</span><b>${l.length} × · ${mengenText(l)}</b></div>`).join('')}</details>` : ''}</div>
   <div class="card" style="padding:0;overflow:hidden"><table class="lstab"><tr><th>#</th><th>LS-Nr.</th><th>Lieferant / Material</th><th class="r">Menge</th></tr>
-   ${tag.map((e, i) => `<tr data-lsedit="${e.id}" class="${e.uebernommen ? 'lsok' : ''} ${e.ocr && e.ocr.auto && e.ocr.auto.length ? 'lsauto' : ''}"><td>${i + 1}</td><td><b>${esc(e.ls) || '–'}</b><div class="small">${new Date(e.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</div></td><td>${esc(e.lief) || '?'}<div class="small">${esc(e.mat) || '<span style="color:var(--rot)">Material fehlt</span>'}${e.uebernommen ? ' · ✓ im Bericht ' + dShort(e.uebernommen.datum, '.') : ''}</div></td><td class="r"><b>${f2(e.menge) || '–'}</b> ${EINH_TXT[e.einh] || e.einh || ''}</td></tr>
-   ${LSV.offen === e.id ? `<tr><td colspan="4" style="background:#fafafa">${lsEditor(e)}</td></tr>` : ''}`).join('') || `<tr><td colspan="4"><div class="hint" style="padding:10px;text-align:center">Noch keine Lieferscheine für diesen Tag.</div></td></tr>`}
+   ${proMaterial(tag).map(([k, l]) => `<tr class="lsgrp"><td colspan="3">${esc(k)}</td><td class="r">${mengenText(l)}</td></tr>` + l.map((e, i) => `<tr data-lsedit="${e.id}" class="${e.uebernommen ? 'lsok' : ''} ${e.ocr && e.ocr.auto && e.ocr.auto.length ? 'lsauto' : ''}"><td>${i + 1}</td><td><b>${esc(e.ls) || '–'}</b><div class="small">${new Date(e.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</div></td><td>${esc(e.lief) || '?'}<div class="small">${esc(e.mat) || '<span style="color:var(--rot)">Material fehlt</span>'}${e.uebernommen ? ' · ✓ im Bericht ' + dShort(e.uebernommen.datum, '.') : ''}</div></td><td class="r"><b>${f2(e.menge) || '–'}</b> ${EINH_TXT[e.einh] || e.einh || ''}</td></tr>
+   ${LSV.offen === e.id ? `<tr><td colspan="4" style="background:#fafafa">${lsEditor(e)}</td></tr>` : ''}`).join('')).join('') || `<tr><td colspan="4"><div class="hint" style="padding:10px;text-align:center">Noch keine Lieferscheine für diesen Tag.</div></td></tr>`}
   </table></div>
-  ${tage.length > 1 || (tage.length && tage[0] !== LSV.datum) ? `<div class="card"><b>Andere Tage dieser Baustelle</b><div class="lst">${tage.filter(d => d !== LSV.datum).map(d => { const l = lsTag(LSV.baunr, d); return `<div class="it" data-lsday="${d}" style="cursor:pointer"><span>${wtag(d)}, ${dateDe(d)}</span><span class="small">${l.length} LS · ${mengenText(l)}${l.every(e => e.uebernommen) ? ' · ✓' : ''}</span></div>` }).join('')}</div></div>` : ''}
+  ${tage.length > 1 || (tage.length && tage[0] !== LSV.datum) ? `<div class="card"><b>Andere Tage dieser Baustelle</b><div class="lst">${tage.filter(d => d !== LSV.datum).map(d => { const l = lsTag(LSV.baunr, d); return `<div class="it" data-lsday="${d}" style="cursor:pointer"><span>${wtag(d)}, ${dateDe(d)}</span><span class="small">${l.length} LS · ${matSummen(l)}${l.every(e => e.uebernommen) ? ' · ✓' : ''}</span></div>` }).join('')}</div></div>` : ''}
   ${tag.some(lsFrei) ? `<button class="btn orange full" data-act="lsbericht">➜ ${tag.filter(lsFrei).length} Lieferscheine in den Tagesbericht übernehmen</button>` : ''}
   <p class="small" style="text-align:center">Die Liste ist unabhängig vom Tagesbericht. Übernommene Lieferscheine sind mit ✓ markiert.</p>`;
 }
@@ -945,7 +954,7 @@ function lsPicker(r) {
   const el = document.createElement('div'); el.className = 'sheet';
   const draw = () => { el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">Lieferscheine übernehmen</b><button class="btn small" data-close>✕</button></div>
     ${r.aps.length > 1 ? `<div class="small" style="margin-top:6px">Zuordnen zu:</div><div class="chips">${r.aps.map(a => `<button class="chip ${a.id === apId ? 'on' : ''}" data-lsap="${a.id}">AP ${esc(a.nr) || '?'}</button>`).join('')}</div>` : ''}</div>
-    <div class="list">${gruppen.map(g => { const frei = g.l.filter(e => lsFrei(e) && !r.material.some(m => m.lsid === e.id)); return `<div class="it" ${frei.length ? `data-lsg="${g.b}|${g.d}"` : ''} style="${frei.length ? '' : 'opacity:.5'}"><span><b>${wtag(g.d)}, ${dateDe(g.d)}</b> · ${esc(g.b)}<br><small style="white-space:normal">${g.l.length} LS · ${mengenText(g.l)} · ${frei.length ? frei.length + ' offen' : 'alle übernommen'}</small></span>${g.d === r.datum && g.b === r.baunr ? '<small>heute</small>' : ''}</div>` }).join('') || '<div class="hint" style="padding:14px">Keine Lieferscheine in der Liste.</div>'}</div></div>` };
+    <div class="list">${gruppen.map(g => { const frei = g.l.filter(e => lsFrei(e) && !r.material.some(m => m.lsid === e.id)); return `<div class="it" ${frei.length ? `data-lsg="${g.b}|${g.d}"` : ''} style="${frei.length ? '' : 'opacity:.5'}"><span><b>${wtag(g.d)}, ${dateDe(g.d)}</b> · ${esc(g.b)}<br><small style="white-space:normal">${g.l.length} LS · ${matSummen(g.l)} · ${frei.length ? frei.length + ' offen' : 'alle übernommen'}</small></span>${g.d === r.datum && g.b === r.baunr ? '<small>heute</small>' : ''}</div>` }).join('') || '<div class="hint" style="padding:14px">Keine Lieferscheine in der Liste.</div>'}</div></div>` };
   draw(); document.body.appendChild(el);
   el.addEventListener('click', e => {
     if (e.target === el || e.target.closest('[data-close]')) { el.remove(); return }
@@ -956,8 +965,123 @@ function lsPicker(r) {
   });
 }
 
+// ---------------------------------------------------------------- Stundenlohnarbeiten (eigener Bereich, Aufbau wie Formular „Stundenlohnbericht“)
+const BERUFE = ['Polier', 'FA', 'MA', 'Azubi', 'Helfer', 'BL'];
+const berufVon = name => BERUF[name] || (name === SET.polier ? 'Polier' : 'MA');
+function neuerSL() { return Object.assign(neuerBericht(), { typ: 'sl', auftrag: '', auftragVom: '', agName: '', sigAG: '' }) }
+const tbEntwurf = () => (S.r && S.r.typ !== 'sl') ? S.r : S.tb;
+function slAktiv(sl) {
+  if (!(S.r && S.r.typ === 'sl')) S.tb = S.r;
+  S.r = S.sl = sl; S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0);
+}
+// Tagesbericht → Stundenlohnbericht: alles übernehmen, dann nur noch anpassen
+function slAusTB(h) {
+  const n = clone(h); ['weg', 'gesendet', '_draft', '_gesendet'].forEach(k => delete n[k]);
+  Object.assign(n, { id: uid(), typ: 'sl', von: h.von || SET.polier, auftrag: h.bauherr || '', auftragVom: '', agName: '', sig: '', sigAG: '', bem: '', vork: '', ausTB: { id: h.id, datum: h.datum } });
+  n.personal = n.personal.filter(p => !p.zus).map(p => Object.assign(p, { beruf: berufVon(p.name) }));
+  n.material.forEach(m => { delete m.lsid; m.fotos = m.fotos || [] });
+  return n;
+}
+function slHistItem(h) { return `<div class="it"><div><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)}<br><span class="small">${esc(h.baustelle)} · ${h.personal.length} Pers. · ${fq(h.personal.reduce((x, p) => x + sumH(p), 0))} h</span></div><div style="display:flex;gap:6px;flex:none"><button class="btn small ghost" data-slkopie="${h.id}">Kopie</button><button class="btn small ghost" data-slresend="${h.id}">Erneut</button></div></div>` }
+function vSLStart() {
+  const d = S.sl && (S.sl.baustelle || S.sl.personal.length || S.sl.aps.some(a => a.text)) ? S.sl : null, tb = tbEntwurf();
+  return `<div class="home-hero"><h2 style="margin-top:0">Stundenlohnarbeiten</h2>
+  ${d ? `<button class="btn orange full big" style="flex-direction:column" data-act="slweiter">Entwurf fortsetzen<br><small style="font-weight:400">${wtag(d.datum)}, ${dateDe(d.datum)} ${esc(d.baunr)} ${esc(d.baustelle)}</small></button>
+    <div class="row" style="margin-top:8px"><button class="btn ghost" data-act="slneu">Neu</button><button class="btn danger" data-act="slverwerfen">Entwurf löschen</button></div>` : `<button class="btn orange full big" data-act="slneu">＋ Neuer Stundenlohnbericht</button>`}
+  ${HIST.length ? `<button class="btn full" style="margin-top:8px;background:#2b2b2b;flex-direction:column" data-act="slaustb">📋 Aus Tagesbericht übernehmen<small style="font-weight:400">Personal, Stunden, Geräte, Arbeiten und Lieferscheine – dann nur anpassen</small></button>` : ''}
+  ${tb && (tb.baustelle || tb.personal.length) ? `<button class="btn ghost full" style="margin-top:8px" data-act="slausentwurf">Aus aktuellem Tagesbericht-Entwurf (${esc(tb.baunr)} ${dateDe(tb.datum)})</button>` : ''}
+  </div>
+  <div class="card"><b>Gesendete Stundenlohnberichte</b><div class="lst">${SLHIST.slice(0, 15).map(slHistItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
+  <p class="small">„Kopie“ beginnt einen neuen Stundenlohnbericht mit den Daten dieses Berichts, „Erneut“ erzeugt PDF und Excel noch einmal zum Senden oder Speichern.</p>`;
+}
+function vKopfSL() {
+  const r = S.r; const bs = [...new Map([...HIST, ...SLHIST].filter(h => h.baunr).map(h => [h.baunr, h])).values()];
+  return `<h2>Baustelle & Auftrag</h2>
+${r.ausTB ? `<div class="demo">Übernommen aus dem Tagesbericht vom <b>${dateDe(r.ausTB.datum)}</b> – bitte Stunden, Arbeiten und Lieferscheine anpassen.</div>` : ''}
+<div class="card">
+ <label style="margin-top:0">Aufgestellt von (Polier/Bauführer)</label>${pickBtn('von', r.von || 'Polier auswählen …')}
+ <div class="grid2"><div><label>Datum</label><input type="date" data-f="datum" value="${r.datum}"></div><div><label>Tag</label><input value="${wtag(r.datum)}" disabled></div></div>
+ <label>Baustellen-Nr.</label><input data-f="baunr" list="bslist" inputmode="numeric" value="${esc(r.baunr)}" placeholder="z. B. 26025">
+ <datalist id="bslist">${bs.map(h => `<option value="${esc(h.baunr)}">${esc(h.baustelle)}</option>`).join('')}</datalist>
+ <label>Baustelle</label><input data-f="baustelle" value="${esc(r.baustelle)}" placeholder="z. B. Ulm BWK NB Psychiatrie">
+ <label>Bauteil / Zusatz (optional)</label><input data-f="bauteil" value="${esc(r.bauteil)}" placeholder="z. B. Rückbau Straßenbeleuchtung">
+</div>
+<div class="card">
+ <label style="margin-top:0">Ausgeführt nach mündl./schriftl. Auftrag durch</label><input data-f="auftrag" value="${esc(r.auftrag)}" placeholder="z. B. Staatliches Hochbauamt Ulm, Hr. Mustermann">
+ <label>Auftrag vom</label><input type="date" data-f="auftragVom" value="${esc(r.auftragVom)}">
+</div>`;
+}
+function vAbschlussSL() {
+  const r = S.r, res = pruefe(r); const e = res.filter(x => x.t === 'e').length, w = res.filter(x => x.t === 'w').length; return `<h2>Abschluss</h2>
+<div class="card"><label style="margin-top:0">Bemerkung (erscheint unter den Arbeiten)</label><textarea data-f="bem" placeholder="z. B. auf Anweisung von Mustermann">${esc(r.bem)}</textarea>
+<div class="mic">🎤 Mikrofon auf der Tastatur antippen: diktieren statt tippen.</div></div>
+<h3>Prüfung ${e ? `<span class="badge" style="background:#fdecea;color:var(--rot)">${e} Fehler</span>` : ''} ${w ? `<span class="badge b-pr">${w} Hinweise</span>` : ''}</h3>
+<div class="card">${res.length ? res.map(x => `<div class="check"><span class="dot ${x.t}">${x.t === 'e' ? '!' : '?'}</span><div>${x.m} <a href="#" data-go="${x.s}">ändern</a></div></div>`).join('') : `<div class="check"><span class="dot ok">✓</span><div>Alles vollständig.</div></div>`}</div>
+<h3>Unterschrift Polier</h3><div class="card"><canvas class="sigpad" id="sig"></canvas><div class="prow" style="margin-top:6px"><span class="hint" style="margin:0">Mit dem Finger unterschreiben</span><button class="btn small ghost" data-act="sigclear">Löschen</button></div></div>
+<h3>Geprüft u. anerkannt (Auftraggeber/Bauleiter)</h3><div class="card"><label style="margin-top:0">Name</label><input data-f="agName" value="${esc(r.agName)}" placeholder="z. B. Mustermann (Bauleitung)">
+<canvas class="sigpad" id="sig2" style="margin-top:8px"></canvas><div class="prow" style="margin-top:6px"><span class="hint" style="margin:0">Optional – direkt vor Ort auf dem Handy unterschreiben lassen</span><button class="btn small ghost" data-act="sig2clear">Löschen</button></div></div>
+<h3>Vorschau</h3>${docViewer(r)}`;
+}
+function pruefeSL(r) {
+  const o = [], D = slDaten(r);
+  if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (aufgestellt von) fehlt.' });
+  if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
+  if (!r.baustelle) o.push({ t: 'e', s: 0, m: 'Baustelle fehlt.' });
+  if (!r.auftrag) o.push({ t: 'w', s: 0, m: 'Auftraggeber („Auftrag durch“) fehlt.' });
+  if (!r.aps.some(a => (a.text || '').trim())) o.push({ t: 'e', s: 1, m: 'Bitte beschreiben, welche Arbeiten ausgeführt wurden.' });
+  if (D.arb.length > 40) o.push({ t: 'w', s: 1, m: `Arbeiten zu lang (${D.arb.length} Zeilen, Platz für 40) – bitte kürzen.` });
+  if (!r.personal.length && !r.geraete.length) o.push({ t: 'e', s: 2, m: 'Weder Personal noch Geräte eingetragen.' });
+  if (r.personal.length > 9) o.push({ t: 'w', s: 2, m: 'Mehr als 9 Personen – das Formular hat nur 9 Zeilen.' });
+  r.personal.forEach(p => { if (!sumH(p)) o.push({ t: 'e', s: 2, m: `${esc(p.name)}: keine Stunden.` }); if (!p.beruf) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: Beruf fehlt.` }) });
+  if (r.geraete.length > 11) o.push({ t: 'w', s: 3, m: 'Mehr als 11 Geräte – das Formular hat nur 11 Zeilen.' });
+  r.geraete.forEach(g => { if (!sumH(g)) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: keine Stunden.` }) });
+  r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge)) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (m.ls && !m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto für die Anlage.` }) });
+  if (D.mat.length > 11) o.push({ t: 'w', s: 4, m: 'Mehr als 11 Materialarten – das Formular hat nur 11 Zeilen.' });
+  if (!r.sig) o.push({ t: 'w', s: 5, m: 'Unterschrift Polier fehlt.' });
+  if (!r.sigAG) o.push({ t: 'w', s: 5, m: 'Unterschrift Auftraggeber fehlt – kann auch später auf dem Ausdruck erfolgen.' });
+  return o;
+}
+// A4 wie das Excel-Formular (Spaltenbreiten aus der Vorlage)
+function docSL(r) {
+  const D = slDaten(r), E = v => esc(v ?? ''), sumP = D.pers.reduce((a, p) => a + p.std, 0);
+  const W = [61, 33, 36, 24, 53, 46, 67, 73, 63, 63, 75, 111];
+  const A = i => `<td colspan="4" class="bi">${E(D.arb[i - 11])}</td>`;   // Kennzeichnung der Arbeit, Zeile 11–50
+  const rows = [];
+  rows.push(`<td colspan="6" class="tt" style="border:0;border-bottom:2px solid #ED7102;text-align:center">Stundenlohnbericht</td><td class="nob r" style="font-size:12px">Baustelle:</td><td colspan="5" class="bi" style="border:0;border-bottom:1px solid #000;font-size:12px">${E([r.baunr, r.baustelle].filter(Boolean).join(' ') + (r.bauteil ? ', ' + r.bauteil : ''))}</td>`);
+  rows.push(`<td colspan="6" class="nob c sm">für tägliche Abrechnung</td><td class="nob r" style="font-size:12px">Datum:</td><td colspan="5" class="bi" style="border:0;border-bottom:1px solid #000;font-size:12px">${dateDe(r.datum)}</td>`);
+  rows.push(`<td colspan="12" class="nob" style="height:6px"></td>`);
+  rows.push(`<td rowspan="5" class="sm" style="vertical-align:top;border-right:0">Firma:</td><td colspan="4" rowspan="5" style="border-left:0;vertical-align:top;padding-top:4px;white-space:normal"><img src="icons/logo-dark.png" style="height:30px;display:block"><div style="font-size:8.5px;line-height:12px;margin-top:3px">${FIRMA.adr}<br>Telefon (073 92) 9703-0</div></td><td colspan="7" class="sm" style="border-bottom:0">Tagelohnarbeiten ausgeführt nach mündl./schriftl. Auftrag durch</td>`);
+  rows.push(`<td colspan="7" rowspan="2" class="bi" style="border-top:0;font-size:12px">${E(r.auftrag)}</td>`); rows.push('');
+  rows.push(`<td colspan="4" rowspan="2"></td><td rowspan="2" class="sm r" style="border-right:0">vom:</td><td colspan="2" rowspan="2" class="bi c" style="border-left:0">${r.auftragVom ? dateDe(r.auftragVom) : ''}</td>`); rows.push('');
+  rows.push(`<td colspan="5" class="c" style="font-weight:700;font-size:12px;height:24px">Namen der Arbeiter</td><td class="c" style="font-weight:700">Beruf</td><td colspan="2" class="c" style="font-weight:700;font-size:12px">Stunden</td><td colspan="4" class="c" style="font-weight:700;font-size:12px">Kennzeichnung der Arbeit</td>`);
+  for (let i = 0; i < 9; i++) { const p = D.pers[i]; rows.push(`<td colspan="5" class="bi">${p ? E(p.name) : ''}</td><td class="c">${p ? E(p.beruf) : ''}</td><td class="r">${p ? fq(p.std) : ''}</td><td></td>${A(11 + i)}`) }
+  rows.push(`<td colspan="6" class="r sm">${D.pers.length ? 'Summe' : ''}</td><td class="r" style="font-weight:700">${D.pers.length ? fq(sumP) : ''}</td><td></td>${A(20)}`);
+  rows.push(`<td colspan="8" rowspan="2" class="c" style="font-weight:700;font-size:12px">Eingebautes Material</td>${A(21)}`); rows.push(A(22));
+  rows.push(`<td colspan="2" rowspan="2" class="c" style="font-weight:700">Menge</td><td colspan="6" rowspan="2" class="c" style="font-weight:700">Bezeichnung</td>${A(23)}`); rows.push(A(24));
+  for (let i = 0; i < 11; i++) { const m = D.mat[i]; rows.push(`<td class="r bi">${m ? fq(m.menge) : ''}</td><td class="c">${m ? E(EINH_TXT[m.einh] || m.einh) : ''}</td><td colspan="5" class="bi">${m ? E(m.mat + (m.lief ? ' (' + m.lief + ')' : '')) : ''}</td><td class="r sm">${m && m.ls.length ? m.ls.length + ' LS' : ''}</td>${A(25 + i)}`) }
+  rows.push(`<td colspan="8" rowspan="2" class="c" style="font-weight:700;font-size:12px">Vorhaltung von Maschinen, Geräte und Fahrzeuge</td>${A(36)}`); rows.push(A(37));
+  rows.push(`<td rowspan="2" class="c" style="font-weight:700">Menge</td><td colspan="6" rowspan="2" class="c" style="font-weight:700">Bezeichnung</td><td rowspan="2" class="c" style="font-weight:700">Std.</td>${A(38)}`); rows.push(A(39));
+  for (let i = 0; i < 11; i++) { const g = D.ger[i]; rows.push(`<td class="c">${g ? g.anz : ''}</td><td colspan="5" class="bi" style="font-size:9.5px">${g ? E(g.name) : ''}</td><td class="r sm">${g ? E(g.ks) : ''}</td><td class="r">${g ? fq(g.std) : ''}</td>${A(40 + i)}`) }
+  const sigImg = s => s ? `<img src="${s}" style="height:44px;display:block;margin:0 auto">` : '';
+  rows.push(`<td class="sm" style="border-bottom:0;border-right:0">Aufgestellt:</td><td colspan="2" class="sm bi" style="border:0;border-top:1px solid #000">${E(r.von)}</td><td class="sm" style="border:0;border-top:1px solid #000">am:</td><td class="sm bi" style="border-left:0;border-bottom:0;border-top:1px solid #000">${dShort(r.datum, '.')}</td><td colspan="2" class="sm" style="border-bottom:0;border-right:0">Geprüft u. anerkannt:</td><td class="sm bi" style="border:0;border-top:1px solid #000">${E(r.agName)}</td><td class="sm" style="border-left:0;border-bottom:0">am: ${r.sigAG ? dShort(r.datum, '.') : ''}</td><td colspan="2" class="sm" style="border-bottom:0;border-right:0">Ausgewertet:</td><td class="sm" style="border-left:0;border-bottom:0">am:</td>`);
+  rows.push(`<td colspan="5" rowspan="3" style="border-top:0;height:56px">${sigImg(r.sig)}</td><td colspan="4" rowspan="3" style="border-top:0">${sigImg(r.sigAG)}</td><td colspan="3" rowspan="3" style="border-top:0"></td>`); rows.push(''); rows.push('');
+  rows.push(`<td colspan="5" class="sm">Polier/Bauführer</td><td colspan="4" class="sm">Bauleiter/Bauherr</td><td colspan="3" class="sm">Bauführer/Buchhaltung</td>`);
+  return `<div class="a4 sl"><table><colgroup>${W.map(w => `<col style="width:${w}px">`).join('')}</colgroup>${rows.map(x => `<tr>${x}</tr>`).join('')}</table></div>`;
+}
+function slJson(r) {
+  const D = slDaten(r);
+  return { format: 'schwall-stundenlohn', version: 1, app_version: APP_VERSION, id: r.id, erstellt: new Date().toISOString(), datum: r.datum, wochentag: wtag(r.datum), polier: r.von,
+    baustelle_nr: r.baunr, baustelle: r.baustelle, bauteil: r.bauteil, auftrag_durch: r.auftrag, auftrag_vom: r.auftragVom, anerkannt_von: r.agName, anerkannt_unterschrieben: !!r.sigAG,
+    arbeiten: r.aps.filter(a => a.text).map(a => ({ ap: a.nr, text: a.text })), bemerkung: r.bem,
+    personal: r.personal.map(p => ({ name: p.name, persnr: p.nr, beruf: p.beruf || '', stunden: sumH(p) })),
+    geraete: D.ger.map(g => ({ bezeichnung: g.name, kostenstelle: g.ks, stunden: g.std })),
+    material: r.material.map(m => ({ lieferant: m.lief, material: m.mat, einheit: m.einh, lieferschein: m.ls, menge: num(m.menge), fotos: m.fotos.length })),
+    aus_tagesbericht: r.ausTB || null };
+}
+
 // ---------------------------------------------------------------- Prüfregeln
 function pruefe(r) {
+  if (r.typ === 'sl') return pruefeSL(r);
   const o = [], d = dauer(r);
   if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (ausgestellt von) fehlt.' });
   if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
@@ -1080,14 +1204,15 @@ function fitA4() { document.querySelectorAll('.a4box').forEach(b => { const a = 
 window.addEventListener('resize', fitA4);
 
 // ---------------------------------------------------------------- Unterschrift
-function initSig() {
-  const c = $('#sig'); if (!c) return; const dpr = window.devicePixelRatio || 1; c.width = c.clientWidth * dpr; c.height = c.clientHeight * dpr;
+function initSig() { sigPad('#sig', 'sig'); sigPad('#sig2', 'sigAG') }
+function sigPad(sel, key) {
+  const c = $(sel); if (!c) return; const dpr = window.devicePixelRatio || 1; c.width = c.clientWidth * dpr; c.height = c.clientHeight * dpr;
   const x = c.getContext('2d'); x.scale(dpr, dpr); x.lineWidth = 2.4; x.lineCap = 'round'; x.lineJoin = 'round'; x.strokeStyle = '#111';
-  if (S.r.sig) { const im = new Image(); im.onload = () => x.drawImage(im, 0, 0, c.clientWidth, c.clientHeight); im.src = S.r.sig }
+  if (S.r[key]) { const im = new Image(); im.onload = () => x.drawImage(im, 0, 0, c.clientWidth, c.clientHeight); im.src = S.r[key] }
   let on = false; const pt = e => { const b = c.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top] };
   c.onpointerdown = e => { on = true; c.setPointerCapture(e.pointerId); const [a, b] = pt(e); x.beginPath(); x.moveTo(a, b) };
   c.onpointermove = e => { if (!on) return; const [a, b] = pt(e); x.lineTo(a, b); x.stroke() };
-  c.onpointerup = c.onpointercancel = () => { if (!on) return; on = false; S.r.sig = c.toDataURL('image/png'); saveDraft(); const box = document.querySelector('.a4box'); if (box) { box.innerHTML = S.doc === 'tb' ? docTB(S.r) : docBTB(S.r); fitA4() } };
+  c.onpointerup = c.onpointercancel = () => { if (!on) return; on = false; S.r[key] = c.toDataURL('image/png'); saveDraft(); const box = document.querySelector('.a4box'); if (box) { box.innerHTML = S.r.typ === 'sl' ? docSL(S.r) : S.doc === 'tb' ? docTB(S.r) : docBTB(S.r); fitA4() } };
 }
 
 // ---------------------------------------------------------------- Auswahl mit Suche
@@ -1127,6 +1252,7 @@ function openPicker(kind, cb, selected = []) {
 
 // ---------------------------------------------------------------- Daten für Büro (JSON + CSV)
 function berichtDaten(r) {
+  if (r.typ === 'sl') return slJson(r);
   const apNr = id => (r.aps.find(a => a.id === id) || {}).nr || '';
   const perAp = h => Object.entries(h || {}).filter(([, v]) => num(v)).map(([k, v]) => ({ ap: apNr(k), std: num(v) }));
   const lohn = [];
@@ -1165,12 +1291,12 @@ async function seitenBild(html) {
 }
 async function pdfErzeugen(r, art) {
   const { jsPDF } = window.jspdf; const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
-  pdf.setProperties({ title: `${art === 'tb' ? 'Tagesbericht' : 'Bautagebuch'} ${r.baunr} ${dateDe(r.datum)}`, author: r.von, creator: 'Schwall Tagesbericht-App ' + APP_VERSION });
-  pdf.addImage(await seitenBild(art === 'tb' ? docTB(r) : docBTB(r)), 'JPEG', 0, 0, 210, 297);
-  if (art === 'tb') {   // Anlage: Lieferschein-Fotos, 2 pro Seite
+  pdf.setProperties({ title: `${{ tb: 'Tagesbericht', btb: 'Bautagebuch', sl: 'Stundenlohnbericht' }[art]} ${r.baunr} ${dateDe(r.datum)}`, author: r.von, creator: 'Schwall Tagesbericht-App ' + APP_VERSION });
+  pdf.addImage(await seitenBild(art === 'sl' ? docSL(r) : art === 'tb' ? docTB(r) : docBTB(r)), 'JPEG', 0, 0, 210, 297);
+  if (art === 'tb' || art === 'sl') {   // Anlage: Lieferschein-Fotos, 2 pro Seite
     const fotos = r.material.flatMap(m => m.fotos.map(f => [m, f]));
     for (let i = 0; i < fotos.length; i++) {
-      if (i % 2 === 0) { pdf.addPage(); pdf.setFont('helvetica', 'bold'); pdf.setFontSize(14); pdf.text('Anlage Lieferscheine', 12, 16); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9); pdf.text(`Baustelle ${r.baunr} ${r.baustelle} · ${dateDe(r.datum)} · ${r.von}`, 12, 22); pdf.setDrawColor(237, 113, 7); pdf.setLineWidth(0.6); pdf.line(12, 25, 198, 25) }
+      if (i % 2 === 0) { pdf.addPage(); pdf.setFont('helvetica', 'bold'); pdf.setFontSize(14); pdf.text(art === 'sl' ? 'Anlage Lieferscheine zum Stundenlohnbericht' : 'Anlage Lieferscheine', 12, 16); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9); pdf.text(`Baustelle ${r.baunr} ${r.baustelle} · ${dateDe(r.datum)} · ${r.von}`, 12, 22); pdf.setDrawColor(237, 113, 7); pdf.setLineWidth(0.6); pdf.line(12, 25, 198, 25) }
       const [m, f] = fotos[i]; const p = pdf.getImageProperties(f); const maxW = 186, maxH = 122; let w = maxW, h = p.height * w / p.width; if (h > maxH) { h = maxH; w = p.width * h / p.height }
       const y0 = i % 2 === 0 ? 30 : 160; pdf.addImage(f, 'JPEG', 12 + (maxW - w) / 2, y0, w, h);
       pdf.setFontSize(9); pdf.text(`${m.lief} · ${m.mat} · Lieferschein ${m.ls} · ${fq(m.menge)} ${m.einh}`, 12, y0 + h + 5);
@@ -1183,7 +1309,20 @@ async function excelErzeugen(r) {   // füllt die Original-Excel-Vorlage (Tagesb
   if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
   return new Blob([await excelFuellen(JSZip, VORLAGE.slice(0), r, SD, r.sig || null)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
+let VORLAGE_SL = null;
+async function excelSL(r) {
+  if (!VORLAGE_SL) VORLAGE_SL = await (await fetch('vorlage-stundenlohn.xlsx')).arrayBuffer();
+  return new Blob([await slFuellen(JSZip, VORLAGE_SL.slice(0), r)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
 async function dateienErzeugen(r) {
+  if (r.typ === 'sl') {
+    const base = `${r.baunr || 'ohneNr'}-SL-%${yymmdd(r.datum)}`, d = slJson(r);
+    d.bericht_app = Object.assign(clone(r), { material: r.material.map(m => Object.assign({}, m, { fotos: [], ocr: undefined })) });
+    const files = [new File([await pdfErzeugen(r, 'sl')], base.replace('%', '') + '.pdf', { type: 'application/pdf' })];
+    try { files.push(new File([await excelSL(r)], base.replace('%', '') + '.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })) } catch (e) { console.error('Excel', e) }
+    files.push(new File([JSON.stringify(d, null, 1)], base.replace('%', 'DATEN-') + '.txt', { type: 'text/plain' }));
+    return files;
+  }
   const base = `${r.baunr || 'ohneNr'}-%-${yymmdd(r.datum)}`, d = berichtDaten(r);
   d.bericht_app = Object.assign(clone(r), { material: r.material.map(m => Object.assign({}, m, { fotos: [], ocr: undefined })) });   // für die Excel-Erzeugung im Büro
   const files = [
@@ -1197,14 +1336,14 @@ async function dateienErzeugen(r) {
 const teilbar = files => !!(navigator.canShare && navigator.canShare({ files }));
 // manche Android-Handys dürfen Excel-Dateien nicht über „Teilen“ weitergeben → dann ohne Excel teilen (Büro erzeugt sie aus der DATEN-Datei)
 function teilDateien(files) { if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
-const betreff = r => `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
-const mailText = r => `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
+const betreff = r => r.typ === 'sl' ? `Stundenlohnbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}` : `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
+const mailText = r => r.typ === 'sl' ? `${betreff(r)}\n\nStundenlohnbericht (PDF mit Lieferscheinen als Anlage, Excel)\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nAuftrag durch: ${r.auftrag || '–'}\nPolier: ${r.von}\nPersonal: ${r.personal.length} (${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h) · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n${r.sigAG ? 'Vom Auftraggeber unterschrieben' + (r.agName ? ' (' + r.agName + ')' : '') : 'Noch nicht vom Auftraggeber unterschrieben'}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)` : `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
 // ---------------------------------------------------------------- Versand
 function overlay(html) { let o = $('#ov'); if (!o) { o = document.createElement('div'); o.id = 'ov'; o.className = 'overlay'; document.body.appendChild(o) } o.innerHTML = `<div class="box2">${html}</div>`; return o }
 function closeOverlay() { const o = $('#ov'); if (o) o.remove() }
 async function prepare(r) {
-  overlay(`<div class="spin"></div><b>PDFs werden erstellt …</b><p class="small">Das dauert ein paar Sekunden.</p>`);
+  overlay(`<div class="spin"></div><b>${r.typ === 'sl' ? 'Stundenlohnbericht wird erstellt …' : 'PDFs werden erstellt …'}</b><p class="small">Das dauert ein paar Sekunden.</p>`);
   try {
     const files = await dateienErzeugen(r); S.prepared = { r, files };
     if (SET.uploadUrl) return uploadSenden();
@@ -1213,12 +1352,13 @@ async function prepare(r) {
 }
 function zeigeVersand(hinweis = '') {
   const { r, files } = S.prepared, td = teilDateien(files), kann = !!td.files;
-  overlay(`<b style="font-size:18px">Bericht ist fertig ✓</b>${hinweis}
+  overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
   ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b><br>Der Betreff wird mitgegeben. Falls das Betreff-Feld leer bleibt: lange hineintippen → <b>Einsetzen</b> (er ist schon kopiert).</p>
     ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Hinweis: Dieses Handy kann die Excel-Datei nicht anhängen. Das Büro erzeugt sie aus der DATEN-Datei (siehe Anleitung).</p>' : ''}
-    <button class="btn orange full big" data-act="share">📤 Senden</button>`
+    <button class="btn orange full big" data-act="share">📤 Senden</button>
+    <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>`
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
@@ -1227,6 +1367,20 @@ async function share() {
   try { await navigator.clipboard.writeText(betreff(r)) } catch (e) { }
   try { await navigator.share({ files, title: betreff(r), text: mailText(r) }); await abgeschlossen('mail') }
   catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich: ' + e.message); }
+}
+// Dateien nur ablegen (ohne Versand): Laptop → Ordner wählen, iPhone → „In Dateien sichern“, Android → Download-Ordner
+async function speichern() {
+  const { files } = S.prepared;
+  try {
+    if (window.showDirectoryPicker && !/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+      const dir = await showDirectoryPicker({ id: 'schwall-berichte', mode: 'readwrite' });
+      for (const f of files) { const h = await dir.getFileHandle(f.name, { create: true }), w = await h.createWritable(); await w.write(f); await w.close() }
+      toast(`${files.length} Dateien im Ordner „${dir.name}“ gespeichert`, 4000); return;
+    }
+    if (isIOS() && teilbar(files)) { toast('Im nächsten Fenster „In Dateien sichern“ wählen', 4000); await navigator.share({ files }); return }
+    files.forEach((f, i) => setTimeout(() => { const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove() }, i * 400));
+    toast('Dateien werden im Download-Ordner gespeichert', 4000);
+  } catch (e) { if (e.name !== 'AbortError') toast('Speichern nicht möglich: ' + e.message) }
 }
 function download() {
   const { r, files } = S.prepared;
@@ -1258,10 +1412,19 @@ async function sendQueue(silent) {
 const kurz = r => ({ id: r.id, datum: r.datum, baunr: r.baunr, baustelle: r.baustelle, aps: r.aps.map(a => ({ nr: a.nr, text: a.text })) });
 async function abgeschlossen(weg, wartet) {
   const r = S.prepared.r; try { lernen(r) } catch (e) { }
+  if (r.typ === 'sl') {
+    SLHIST = SLHIST.filter(h => h.id !== r.id); SLHIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); SLHIST = SLHIST.slice(0, 30); SLHIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
+    await DB.set('slhistory', SLHIST);
+    if (S.sl && S.sl.id === r.id) { await DB.del('draft_sl'); S.sl = null; if (S.r && S.r.typ === 'sl') { S.r = S.tb || null; S.tb = null } }
+    S.prepared = null;
+    overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
+  <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovsl">Zu den Stundenlohnarbeiten</button><button class="btn ghost full" style="margin-top:8px" data-act="ovhome">Zur Startseite</button>`);
+    return;
+  }
   const lsIds = new Set(r.material.map(m => m.lsid).filter(Boolean)); if (lsIds.size) { LSL.forEach(e => { if (lsIds.has(e.id)) e.uebernommen = { datum: r.datum, baunr: r.baunr, id: r.id } }); await lsSpeichern() }
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
   HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
-  await DB.set('history', HIST); await DB.del('draft'); S.r = null; S.prepared = null;
+  await DB.set('history', HIST); if (!S.r || S.r.id === r.id) { await DB.del('draft'); S.r = null } S.prepared = null;
   overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
   <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
 }
@@ -1287,6 +1450,9 @@ document.addEventListener('click', async e => {
   if (ds.vorlage) { const h = HIST.find(x => x.id === ds.vorlage); if (h) vorlageMitPruefung(h); return }
   if (ds.matchip) { const [id, i] = ds.matchip.split('|'); const m = r.material.find(x => x.id === id); const c = m.ocr.chips[+i]; m.mat = c[1]; m.einh = c[2]; const sm = SD.mat.find(x => x[0] === c[1]); m.matnr = sm ? sm[1] : ''; m.ocr.auto = m.ocr.auto.filter(f => !f.startsWith('mat')); saveDraft(); render(); return }
   if (ds.resend) { const h = HIST.find(x => x.id === ds.resend); if (h) prepare(clone(h)); return }
+  if (ds.slresend) { const h = SLHIST.find(x => x.id === ds.slresend); if (h) prepare(clone(h)); return }
+  if (ds.slkopie) { const h = SLHIST.find(x => x.id === ds.slkopie); if (!h || !(await slErsetzen())) return; const n = clone(h); ['weg', 'gesendet'].forEach(k => delete n[k]); Object.assign(n, { id: uid(), datum: today(), sig: '', sigAG: '', agName: '', ausTB: null }); n.material = []; slAktiv(n); toast('Kopie angelegt – Datum, Stunden und Lieferscheine bitte anpassen', 4000); return }
+  if (ds.beruf) { const [id, b] = ds.beruf.split('|'); const p = r.personal.find(x => x.id === id); p.beruf = p.beruf === b ? '' : b; if (p.beruf) { BERUF[p.name] = b; DB.set('berufe', BERUF) } saveDraft(); render(); return }
   if (ds.pick) {
     const [k, id] = ds.pick.split('|');
     if (k === 'lslief') { openPicker('lief', l => { const e = LSL.find(x => x.id === id); e.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; lsSpeichern() }); return }
@@ -1297,6 +1463,13 @@ document.addEventListener('click', async e => {
     return;
   }
   const a = ds.act; if (!a) return;
+  if (a === 'slstart' || a === 'ovsl') { closeOverlay(); S.view = 'sl'; render(); scrollTo(0, 0); return }
+  if (a === 'slweiter') { slAktiv(S.sl); return }
+  if (a === 'slneu') { if (await slErsetzen()) { const n = neuerSL(); const t = tbEntwurf(); if (t && t.baunr) Object.assign(n, { baunr: t.baunr, baustelle: t.baustelle, bauteil: t.bauteil, auftrag: t.bauherr || '' }); slAktiv(n) } return }
+  if (a === 'slverwerfen') { if (await bestaetigen('Stundenlohn-Entwurf wirklich löschen?')) { S.sl = null; if (S.r && S.r.typ === 'sl') { S.r = S.tb || null; S.tb = null } await DB.del('draft_sl'); render() } return }
+  if (a === 'slaustb') { histPicker('Tagesbericht übernehmen', async h => { if (await slErsetzen()) { slAktiv(slAusTB(h)); toast(`Tagesbericht vom ${dateDe(h.datum)} übernommen – jetzt Stunden, Arbeiten und Lieferscheine anpassen`, 4500) } }); return }
+  if (a === 'slausentwurf') { const t = tbEntwurf(); if (t && await slErsetzen()) { slAktiv(slAusTB(t)); toast('Tagesbericht-Entwurf übernommen – bitte anpassen', 4000) } return }
+  if (a === 'sig2clear') { r.sigAG = ''; saveDraft(); render(); return }
   if (a === 'telefon') { if (S.r && (S.r.personal.length || S.r.baustelle) && !(await bestaetigen('Es gibt schon einen Entwurf. Neuen Bericht per Gespräch beginnen? Der Entwurf wird ersetzt.'))) return; S.r = null; telStart() }
   if (a === 'mic') { if (TEL.listening) { const r2 = TEL.rec; if (r2) r2.stop() } else { try { speechSynthesis.cancel() } catch (e) { } hoeren() } }
   if (a === 'telwdh') telBot(TEL.frage);
@@ -1336,6 +1509,7 @@ document.addEventListener('click', async e => {
     prepare(r);
   }
   if (a === 'share') share();
+  if (a === 'speichern') speichern();
   if (a === 'download') download();
   if (a === 'ovclose') closeOverlay();
   if (a === 'ovhome') { closeOverlay(); S.view = 'home'; render(); scrollTo(0, 0) }
@@ -1347,8 +1521,9 @@ document.addEventListener('click', async e => {
     await DB.set('settings', SET); toast('Gespeichert ✓'); S.view = 'home'; render();
   }
   if (a === 'lernreset') { if (await bestaetigen('Alles Gelernte zu Lieferscheinen löschen?')) { LERN = { alias: {}, lief: {} }; await DB.set('lernen', LERN); render() } }
-  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'history', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
+  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'draft_sl', 'history', 'slhistory', 'berufe', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
 });
+async function slErsetzen() { const d = S.sl; return !(d && (d.baustelle || d.personal.length || d.aps.some(a => a.text))) || await bestaetigen('Der offene Stundenlohn-Entwurf wird ersetzt. Fortfahren?') }
 function bestaetigen(text) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
 
 document.addEventListener('input', e => {

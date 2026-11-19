@@ -19,11 +19,11 @@
 </style>
 </head>
 <body>
-<header><img src="icons/logo-header.png" alt="Schwall"><h1>Büro: Excel-Tagesbericht aus DATEN-Datei erzeugen</h1></header>
+<header><img src="icons/logo-header.png" alt="Schwall"><h1>Büro: Excel aus DATEN-Datei erzeugen (Tagesbericht oder Stundenlohn)</h1></header>
 <main>
   <div class="card">
     <p>Jede Bericht-Mail der App enthält die Datei <b>…-DATEN-….txt</b>. Daraus entsteht hier die Excel-Datei im gewohnten
-    Formular (Tagesbericht + Bautagebuch + Blatt „Lohn“), z. B. wenn ein Android-Handy die Excel nicht mitschicken konnte.</p>
+    Formular (Tagesbericht + Bautagebuch + Blatt „Lohn“ bzw. Stundenlohnbericht + Blatt „Lieferscheine“), z. B. wenn ein Android-Handy die Excel nicht mitschicken konnte.</p>
     <label class="drop" id="drop">📂 DATEN-Datei(en) hier ablegen oder klicken<input type="file" id="f" accept=".txt,.json" multiple hidden></label>
     <p><small>Alles läuft nur in diesem Browser – es wird nichts hochgeladen.</small></p>
   </div>
@@ -32,7 +32,7 @@
 <script src="vendor/jszip.min.js"></script>
 <script src="excel.js"></script>
 <script>
-let VORLAGE = null;
+let VORLAGE = null, VORLAGE_SL = null;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // Bericht aus der DATEN-Datei wiederherstellen (neue Dateien enthalten ihn komplett, ältere werden umgebaut)
 function berichtAus(d) {
@@ -52,10 +52,18 @@ async function verarbeiten(files) {
   for (const f of files) {
     const row = document.createElement('div'); row.className = 'it'; row.innerHTML = `<span>${esc(f.name)}</span><span>wird erzeugt …</span>`; out.appendChild(row);
     try {
-      const d = JSON.parse(await f.text()); if (d.format !== 'schwall-tagesbericht') throw new Error('keine DATEN-Datei der Tagesbericht-App');
-      const r = berichtAus(d);
-      const buf = await excelFuellen(JSZip, VORLAGE.slice(0), r, null, r.sig || null);
-      const name = `${r.baunr || 'ohneNr'}-TB-BTB-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
+      const d = JSON.parse(await f.text()); let buf, name;
+      if (d.format === 'schwall-stundenlohn') {   // Stundenlohnbericht
+        if (!d.bericht_app) throw new Error('DATEN-Datei ohne Berichtsdaten');
+        if (!VORLAGE_SL) VORLAGE_SL = await (await fetch('vorlage-stundenlohn.xlsx')).arrayBuffer();
+        const r = d.bericht_app; buf = await slFuellen(JSZip, VORLAGE_SL.slice(0), r);
+        name = `${r.baunr || 'ohneNr'}-SL-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
+      } else {
+        if (d.format !== 'schwall-tagesbericht') throw new Error('keine DATEN-Datei der Tagesbericht-App');
+        const r = berichtAus(d);
+        buf = await excelFuellen(JSZip, VORLAGE.slice(0), r, null, r.sig || null);
+        name = `${r.baunr || 'ohneNr'}-TB-BTB-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
+      }
       const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
       row.lastElementChild.innerHTML = `<a href="${url}" download="${esc(name)}" class="ok">✓ ${esc(name)}</a>`;

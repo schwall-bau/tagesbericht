@@ -125,6 +125,72 @@
     zip.file('[Content_Types].xml', ct);
     return zip.generateAsync({ type: typeof window !== 'undefined' ? 'arraybuffer' : 'nodebuffer', compression: 'DEFLATE' });
   }
+
+  // ---------------------------------------------------------------- Stundenlohnbericht
+  const sumH = o => Object.values(o.h || {}).reduce((a, b) => a + n(b), 0);
+  // gemeinsame Aufbereitung für Excel und PDF
+  function slDaten(r, breite) {
+    const arb = [];
+    r.aps.forEach(a => { if (!a.text && !a.nr) return; if (arb.length) arb.push(''); umbrechen((a.nr ? 'AP ' + a.nr + ': ' : '') + (a.text || ''), breite || 46).forEach(l => arb.push(l)) });
+    if (r.bem) { if (arb.length) arb.push(''); umbrechen('Bemerkung: ' + r.bem, breite || 46).forEach(l => arb.push(l)) }
+    const g = new Map();
+    r.material.forEach(m => { const k = (m.lief || '') + '|' + (m.mat || '') + '|' + (m.einh || ''); if (!g.has(k)) g.set(k, { lief: m.lief || '', mat: m.mat || '', einh: m.einh || '', menge: 0, ls: [] }); const x = g.get(k); x.menge += n(m.menge); if (m.ls) x.ls.push(m.ls) });
+    return {
+      pers: r.personal.map(p => ({ name: p.name, nr: p.nr || '', beruf: p.beruf || '', std: sumH(p) })),
+      arb, mat: [...g.values()],
+      ger: r.geraete.map(x => ({ anz: 1, name: x.name + (x.firma ? ' (' + x.firma + ')' : ''), ks: x.ks || '', std: sumH(x) }))
+    };
+  }
+  const datumKurz = iso => iso ? iso.split('-').reverse().join('.') : '';
+  async function slFuellen(JSZip, vorlage, r) {
+    const zip = await JSZip.loadAsync(vorlage), D = slDaten(r);
+    const S1 = 'xl/worksheets/sheet1.xml'; let x = await zip.file(S1).async('string');
+    const set = (ref, v) => { x = setze(x, ref, v) };
+    set('H1', [r.baunr, r.baustelle].filter(Boolean).join(' ') + (r.bauteil ? ', ' + r.bauteil : ''));
+    set('H3', serial(r.datum));
+    set('F6', r.auftrag || null); set('K8', r.auftragVom ? serial(r.auftragVom) : null);
+    D.pers.slice(0, 9).forEach((p, i) => { const row = 11 + i; set('A' + row, p.name); set('F' + row, p.beruf || null); set('G' + row, p.std || null) });
+    if (D.pers.length) { set('A20', 'Summe'); set('G20', D.pers.reduce((a, p) => a + p.std, 0)) }
+    D.arb.slice(0, 40).forEach((l, i) => set('I' + (11 + i), l || null));
+    D.mat.slice(0, 11).forEach((m, i) => { const row = 25 + i; set('A' + row, m.menge || null); set('B' + row, ({ to: 't', m3: 'm³' })[m.einh] || m.einh || null); set('C' + row, m.mat + (m.lief ? ' (' + m.lief + ')' : '')); set('H' + row, m.ls.length ? m.ls.length + ' LS' : null) });
+    D.ger.slice(0, 11).forEach((g, i) => { const row = 40 + i; set('A' + row, g.anz); set('B' + row, g.name); set('G' + row, g.ks || null); set('H' + row, g.std || null) });
+    set('B51', r.von || null); set('E51', serial(r.datum));
+    if (r.agName) set('G51', r.agName);
+    if (r.sigAG) set('I51', datumKurz(r.datum));
+    // Unterschriften (Polier links, Auftraggeber Mitte)
+    const bilder = [];
+    if (r.sig) bilder.push([r.sig, 0]); if (r.sigAG) bilder.push([r.sigAG, 5]);
+    if (bilder.length) {
+      let rel = '', anker = '';
+      bilder.forEach(([b, col], i) => { zip.file(`xl/media/sl_sig${i + 1}.png`, b.split(',')[1], { base64: true }); rel += `<Relationship Id="rIdS${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/sl_sig${i + 1}.png"/>`; anker += bildAnker(i + 2, 'rIdS' + (i + 1), col, 51, 170, 45) });
+      zip.file('xl/drawings/drawing1.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' + anker + '</xdr:wsDr>');
+      zip.file('xl/drawings/_rels/drawing1.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rel + '</Relationships>');
+      let sr = await zip.file('xl/worksheets/_rels/sheet1.xml.rels').async('string');
+      sr = sr.replace('</Relationships>', '<Relationship Id="rIdDr" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>');
+      zip.file('xl/worksheets/_rels/sheet1.xml.rels', sr);
+      x = x.replace(/(<pageSetup[^>]*\/>(?:<headerFooter[\s\S]*?<\/headerFooter>|<headerFooter[^>]*\/>)?(?:<rowBreaks[\s\S]*?<\/rowBreaks>)?(?:<colBreaks[\s\S]*?<\/colBreaks>)?)/, '$1<drawing r:id="rIdDr"/>');
+      let ct = await zip.file('[Content_Types].xml').async('string');
+      if (!/Extension="png"/i.test(ct)) ct = ct.replace('<Override', '<Default Extension="png" ContentType="image/png"/><Override');
+      ct = ct.replace('</Types>', '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>');
+      zip.file('[Content_Types].xml', ct);
+    }
+    zip.file(S1, x);
+    // Blatt „Lieferscheine“: jeder Lieferschein einzeln (Fotos stehen im PDF als Anlage)
+    const zeilen = [['Datum', 'Baustellen-Nr.', 'Lieferant', 'Material', 'Lieferschein-Nr.', 'Menge', 'Einheit']];
+    r.material.forEach(m => zeilen.push([datumKurz(m.lsdatum || r.datum), r.baunr || '', m.lief || '', m.mat || '', m.ls || '', n(m.menge), m.einh || '']));
+    const COL = 'ABCDEFG';
+    const sd = zeilen.map((z, i) => `<row r="${i + 1}">` + z.map((v, j) => zellXml(COL[j] + (i + 1), null, typeof v === 'number' ? v : (v === '' ? null : String(v)))).join('') + '</row>').join('');
+    zip.file('xl/worksheets/sheet9.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><cols><col min="1" max="2" width="13" customWidth="1"/><col min="3" max="3" width="18" customWidth="1"/><col min="4" max="4" width="30" customWidth="1"/><col min="5" max="7" width="14" customWidth="1"/></cols><sheetData>' + sd + '</sheetData></worksheet>');
+    let wb = await zip.file('xl/workbook.xml').async('string');
+    const sid = Math.max(...[...wb.matchAll(/sheetId="(\d+)"/g)].map(q => +q[1])) + 1;
+    wb = wb.replace('</sheets>', `<sheet name="Lieferscheine" sheetId="${sid}" r:id="rIdLS"/></sheets>`); zip.file('xl/workbook.xml', wb);
+    let wr = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+    wr = wr.replace('</Relationships>', '<Relationship Id="rIdLS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet9.xml"/></Relationships>'); zip.file('xl/_rels/workbook.xml.rels', wr);
+    let ct2 = await zip.file('[Content_Types].xml').async('string');
+    ct2 = ct2.replace('</Types>', '<Override PartName="/xl/worksheets/sheet9.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'); zip.file('[Content_Types].xml', ct2);
+    return zip.generateAsync({ type: typeof window !== 'undefined' ? 'arraybuffer' : 'nodebuffer', compression: 'DEFLATE' });
+  }
+  root.slFuellen = slFuellen; root.slDaten = slDaten;
   root.excelFuellen = excelFuellen;
   if (typeof module !== 'undefined') module.exports = { excelFuellen, setze };
 })(typeof window !== 'undefined' ? window : globalThis);

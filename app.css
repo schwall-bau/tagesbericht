@@ -177,3 +177,6 @@ header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 .lstab tr[data-lsedit]{cursor:pointer}
 .lstab tr.lsauto td:first-child{box-shadow:inset 4px 0 0 #e0b400}
 .lstab tr.lsok{background:#f1f8f1}
+
+.lsmat .lsbig{font-size:22px;white-space:nowrap}
+.lstab tr.lsgrp td{background:#fff4ea;font-weight:700;font-size:13px;border-top:2px solid #f6c89a}
