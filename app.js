@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.13.4';
+const APP_VERSION = '1.14.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -1444,13 +1444,18 @@ async function prepare(r) {
 }
 function zeigeVersand(hinweis = '') {
   const { r, files } = S.prepared, td = teilDateien(files), kann = !!td.files;
-  if (istPC()) return overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
-  <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
-  <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
-  <p class="small">Auf <b>Senden</b> klicken und im Windows-Fenster <b>Outlook</b> oder <b>Mail</b> wählen – Betreff, Text und Anhänge sind schon drin. Empfänger: <b>${esc(SET.email || 'Büro-Adresse')}</b>.<br>Excel-Dateien gibt Windows beim Teilen nicht weiter: die Excel landet automatisch im Download-Ordner (bei Bedarf in die Mail ziehen; das Büro kann sie auch aus der DATEN-Datei erzeugen).</p>
-  <button class="btn orange full big" data-act="share">📤 Senden</button>
-  <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>
-  <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
+  if (istPC()) {   // Büro-PC mit Outlook Classic: fertige E-Mail-Datei (.eml) mit allen Anhängen
+    overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
+    <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
+    <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
+    <p class="small">Auf <b>Senden</b> klicken – die Mail öffnet sich in <b>Outlook</b> mit Empfänger <b>${esc(SET.email || '')}</b>, Betreff, Anschreiben und allen Anhängen.<br><b>Nur beim ersten Mal:</b> oben rechts bei den Downloads die Datei mit Rechtsklick (oder ⋯) → <b>„Dateien dieses Typs immer öffnen“</b>. Ab dann geht sie automatisch in Outlook auf.</p>
+    <a class="btn orange full big" id="emllink" style="opacity:.5;pointer-events:none">📤 Senden (wird vorbereitet …)</a>
+    <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>
+    <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
+    // Datei vorab bauen: der Klick lädt sie dann direkt (echter Klick → keine Sicherheitswarnung des Browsers)
+    emlErzeugen(r, files).then(f => { const a = $('#emllink'); if (!a) return; a.href = URL.createObjectURL(f); a.download = f.name; a.textContent = '📤 Senden'; a.style.opacity = ''; a.style.pointerEvents = '' });
+    return;
+  }
   overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
@@ -1461,17 +1466,28 @@ function zeigeVersand(hinweis = '') {
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
-// Laptop/PC erkennen (Windows-Teilen nimmt keine Excel-Dateien)
+// Laptop/PC erkennen
+async function emlErzeugen(r, files) {
+  const B = '----=_Schwall_' + uid(), enc = t => '=?UTF-8?B?' + btoa(unescape(encodeURIComponent(t))) + '?=';
+  const zeilen = t => t.replace(/.{1,76}/g, '$&\r\n');
+  const txt = btoa(unescape(encodeURIComponent(mailText(r).replace(/\n/g, '\r\n'))));
+  let m = `To: ${SET.email || ''}\r\nSubject: ${enc(betreff(r))}\r\nX-Unsent: 1\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="${B}"\r\n\r\n`;
+  m += `--${B}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${zeilen(txt)}`;
+  for (const f of files) m += `--${B}\r\nContent-Type: ${f.type || 'application/octet-stream'}; name="${enc(f.name)}"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${enc(f.name)}"\r\n\r\n${zeilen(await b64(f))}`;
+  m += `--${B}--\r\n`;
+  const st = new Date(), z = n => String(n).padStart(2, '0');
+  return new File([m], `Mail ${r.typ === 'sl' ? 'SL' : 'TB'} ${r.baunr || ''} ${dShort(r.datum, '-')} ${z(st.getHours())}${z(st.getMinutes())}.eml`.replace(/[\\/:*?"<>|]/g, ''), { type: 'message/rfc822' });
+}
+document.addEventListener('click', e => { if (e.target.closest('#emllink') && S.prepared) setTimeout(() => abgeschlossen('mail'), 1200) });
 const istPC = () => !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) && !(/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 async function share() {
   const { r } = S.prepared, alle = S.prepared.files;
-  // PC (Windows): Teilen nimmt nur PDF/Text, keine Excel → ohne Excel teilen, Excel in den Download-Ordner
-  const files = istPC() ? alle.filter(f => !/\.xlsx$/.test(f.name)) : teilDateien(alle).files;
+  // Handy: Teilen-Fenster (Outlook, Mail, Gmail …). Android-Chrome nimmt keine Excel-Dateien → dann ohne Excel (Büro erzeugt sie aus DATEN)
+  const files = teilDateien(alle).files;
   navigator.clipboard && navigator.clipboard.writeText(betreff(r)).catch(() => { });
   if (!files || !teilbar(files)) { download(); return }
   try {
     await navigator.share({ files, title: betreff(r), text: mailText(r) });
-    if (istPC()) alle.filter(f => /\.xlsx$/.test(f.name)).forEach(dateiLaden);
     await abgeschlossen('mail');
   } catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich – Dateien werden gespeichert und das Mail-Programm geöffnet', 4000); download() }
 }
