@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -98,7 +98,12 @@ async function init() {
   } catch (e) { console.error(e) }
   S.view = SD ? 'home' : 'setup';
   render();
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    const hatteSW = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update(); setInterval(() => reg.update(), 30 * 60000) }).catch(() => { });
+    // neue Version aktiv → einmal neu laden (Entwurf ist gespeichert)
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hatteSW && !window._reloaded) { window._reloaded = true; flushDraft(); location.reload() } });
+  }
   window.addEventListener('online', () => { sendQueue(true); ocrVorladen() });
   if (SD) setTimeout(ocrVorladen, 3000);
   if (QUEUE.length && navigator.onLine) sendQueue(true);
@@ -156,7 +161,8 @@ function vHome() {
   <div class="card"><div class="prow"><b>Gesendete Berichte</b><button class="btn small ghost" data-view="verlauf">Alle</button></div>
    <div class="lst">${HIST.slice(0, 5).map(histItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
   <div class="card"><div class="prow"><div><b>Einstellungen</b><div class="small">Empfänger: ${esc(SET.email) || '<span style="color:var(--rot)">nicht festgelegt</span>'}<br>Stammdaten: ${SD ? SD.ma.length + ' Mitarbeiter, ' + SD.ge.length + ' Geräte · Stand ' + dateDe(SD.stand) : '–'}</div></div><button class="btn small ghost" data-view="settings">Ändern</button></div>
-   <button class="btn ghost small full" style="margin-top:8px" data-act="sync">🔄 Daten übertragen (PC ⇄ Handy)</button></div>
+   <button class="btn ghost small full" style="margin-top:8px" data-act="sync">🔄 Daten übertragen (PC ⇄ Handy)</button>
+   <button class="btn ghost small full" style="margin-top:8px" data-act="update">⬆️ Nach Update suchen (Version ${APP_VERSION})</button></div>
   <p class="small" style="text-align:center">Version ${APP_VERSION}</p>`;
 }
 function histItem(h) { return `<div class="it"><div><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)}<br><span class="small">${esc(h.baustelle)} · ${h.weg === 'upload' ? 'direkt übertragen' : 'per E-Mail geteilt'} ${h.gesendet ? new Date(h.gesendet).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span></div><div style="display:flex;gap:6px;flex:none"><button class="btn small ghost" data-vorlage="${h.id}">Vorlage</button><button class="btn small ghost" data-resend="${h.id}">Erneut</button></div></div>` }
@@ -1549,6 +1555,7 @@ document.addEventListener('click', async e => {
   }
   const a = ds.act; if (!a) return;
   if (a === 'sync') { syncDialog(); return }
+  if (a === 'update') { if (!('serviceWorker' in navigator)) return; toast('Suche nach neuer Version …'); const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update().catch(() => { }); setTimeout(() => { if (!window._reloaded) toast('Version ' + APP_VERSION + ' ist aktuell') }, 6000); return }
   if (a === 'syncexport') { await syncExport(); return }
   if (a === 'ovclose') { closeOverlay(); return }
   if (a === 'slstart' || a === 'ovsl') { closeOverlay(); S.view = 'sl'; render(); scrollTo(0, 0); return }
