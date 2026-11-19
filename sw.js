@@ -1,6 +1,6 @@
 // Service Worker: macht die App offline nutzbar (Baustelle ohne Netz).
 // Bei jeder neuen Version VERSION erhöhen, damit die Handys das Update laden.
-const VERSION = 'tb-1.13.2';
+const VERSION = 'tb-1.13.3';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest',
   'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js', 'vendor/jszip.min.js', 'excel.js', 'vorlage-tagesbericht.xlsx', 'vorlage-stundenlohn.xlsx', 'buero.html',

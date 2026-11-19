@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.13.2';
+const APP_VERSION = '1.13.3';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -1444,6 +1444,14 @@ async function prepare(r) {
 }
 function zeigeVersand(hinweis = '') {
   const { r, files } = S.prepared, td = teilDateien(files), kann = !!td.files;
+  if (istPC()) return overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
+  <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
+  <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
+  <p class="small"><b>Senden</b> lädt eine fertige E-Mail herunter (an <b>${esc(SET.email || 'Büro-Adresse')}</b>, mit Betreff und allen Anhängen). Die Datei unten in der Download-Leiste öffnen – sie erscheint in Outlook als neue Mail, dann nur noch <b>Senden</b> klicken.</p>
+  <button class="btn orange full big" data-act="emlsenden">📧 Senden (Outlook)</button>
+  <button class="btn ghost small full" style="margin-top:8px" data-act="download">Anderes Mail-Programm: Dateien speichern & Mail öffnen</button>
+  <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>
+  <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
   overlay(`<b style="font-size:18px">${r.typ === 'sl' ? 'Stundenlohnbericht' : 'Bericht'} ist fertig ✓</b>${hinweis}
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
@@ -1454,11 +1462,28 @@ function zeigeVersand(hinweis = '') {
     : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
+// Laptop/PC: Teilen über Windows klappt mit Anhängen nicht zuverlässig → fertige E-Mail-Datei (.eml) für Outlook
+const istPC = () => !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) && !(/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+async function emlErzeugen(r, files) {
+  const B = '----=_Schwall_' + uid(), enc = t => '=?UTF-8?B?' + btoa(unescape(encodeURIComponent(t))) + '?=';
+  const zeilen = t => t.replace(/.{1,76}/g, '$&\r\n');
+  const txt = btoa(unescape(encodeURIComponent(mailText(r).replace(/\n/g, '\r\n'))));
+  let m = `To: ${SET.email || ''}\r\nSubject: ${enc(betreff(r))}\r\nX-Unsent: 1\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="${B}"\r\n\r\n`;
+  m += `--${B}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${zeilen(txt)}`;
+  for (const f of files) m += `--${B}\r\nContent-Type: ${f.type || 'application/octet-stream'}; name="${enc(f.name)}"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${enc(f.name)}"\r\n\r\n${zeilen(await b64(f))}`;
+  m += `--${B}--\r\n`;
+  return new File([m], betreff(r).replace(/[\\/:*?"<>|]/g, '').slice(0, 120) + '.eml', { type: 'message/rfc822' });
+}
+async function emlSenden() {
+  const { r, files } = S.prepared, f = await emlErzeugen(r, files);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+  await abgeschlossen('mail');
+}
 async function share() {
   const { r } = S.prepared, files = teilDateien(S.prepared.files).files;
   try { await navigator.clipboard.writeText(betreff(r)) } catch (e) { }
   try { await navigator.share({ files, title: betreff(r), text: mailText(r) }); await abgeschlossen('mail') }
-  catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich: ' + e.message); }
+  catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich – Dateien werden gespeichert und das Mail-Programm geöffnet', 4000); download() }
 }
 // Dateien nur ablegen (ohne Versand): Laptop → Ordner wählen, iPhone → „In Dateien sichern“, Android → Download-Ordner
 async function speichern(files = S.prepared.files) {
@@ -1509,7 +1534,7 @@ async function abgeschlossen(weg, wartet) {
     if (S.sl && S.sl.id === r.id) { await DB.del('draft_sl'); S.sl = null; if (S.r && S.r.typ === 'sl') { S.r = S.tb || null; S.tb = null } }
     S.prepared = null;
     overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
-  <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovsl">Zu den Stundenlohnarbeiten</button><button class="btn ghost full" style="margin-top:8px" data-act="ovhome">Zur Startseite</button>`);
+  <p class="small">${weg === 'mail' && !wartet ? (istPC() ? 'Die heruntergeladene E-Mail-Datei (.eml) bei den Downloads öffnen und in Outlook auf <b>Senden</b> klicken.' : 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.') : ''}</p><button class="btn orange full" data-act="ovsl">Zu den Stundenlohnarbeiten</button><button class="btn ghost full" style="margin-top:8px" data-act="ovhome">Zur Startseite</button>`);
     return;
   }
   const lsIds = new Set(r.material.map(m => m.lsid).filter(Boolean)); if (lsIds.size) { LSL.forEach(e => { if (lsIds.has(e.id)) e.uebernommen = { datum: r.datum, baunr: r.baunr, id: r.id } }); await lsSpeichern() }
@@ -1517,7 +1542,7 @@ async function abgeschlossen(weg, wartet) {
   HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
   await DB.set('history', HIST); if (!S.r || S.r.id === r.id) { await DB.del('draft'); S.r = null } S.prepared = null;
   overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
-  <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
+  <p class="small">${weg === 'mail' && !wartet ? (istPC() ? 'Die heruntergeladene E-Mail-Datei (.eml) bei den Downloads öffnen und in Outlook auf <b>Senden</b> klicken.' : 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.') : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
 }
 
 // ---------------------------------------------------------------- Ereignisse
@@ -1605,6 +1630,7 @@ document.addEventListener('click', async e => {
   }
   if (a === 'share') share();
   if (a === 'speichern') speichern();
+  if (a === 'emlsenden') emlSenden();
   if (a === 'download') download();
   if (a === 'ovclose') closeOverlay();
   if (a === 'ovhome') { closeOverlay(); S.view = 'home'; render(); scrollTo(0, 0) }
