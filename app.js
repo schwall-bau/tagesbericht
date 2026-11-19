@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.13.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -48,7 +48,7 @@ let SLHIST = [];          // gesendete Stundenlohnberichte
 let BERUF = {};           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
 let saveTimer = null;
 const draftKey = r => r && r.typ === 'sl' ? 'draft_sl' : 'draft';
-function saveDraft() { clearTimeout(saveTimer); saveTimer = setTimeout(() => { if (S.r) DB.set(draftKey(S.r), S.r) }, 400) }
+function saveDraft() { clearTimeout(saveTimer); if (S.r) S.r._t = Date.now(); saveTimer = setTimeout(() => { if (S.r) DB.set(draftKey(S.r), S.r) }, 400) }
 const flushDraft = () => { clearTimeout(saveTimer); if (S.r) DB.set(draftKey(S.r), S.r) };
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushDraft() });
 window.addEventListener('pagehide', flushDraft);
@@ -155,7 +155,8 @@ function vHome() {
   </div>
   <div class="card"><div class="prow"><b>Gesendete Berichte</b><button class="btn small ghost" data-view="verlauf">Alle</button></div>
    <div class="lst">${HIST.slice(0, 5).map(histItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
-  <div class="card"><div class="prow"><div><b>Einstellungen</b><div class="small">Empfänger: ${esc(SET.email) || '<span style="color:var(--rot)">nicht festgelegt</span>'}<br>Stammdaten: ${SD ? SD.ma.length + ' Mitarbeiter, ' + SD.ge.length + ' Geräte · Stand ' + dateDe(SD.stand) : '–'}</div></div><button class="btn small ghost" data-view="settings">Ändern</button></div></div>
+  <div class="card"><div class="prow"><div><b>Einstellungen</b><div class="small">Empfänger: ${esc(SET.email) || '<span style="color:var(--rot)">nicht festgelegt</span>'}<br>Stammdaten: ${SD ? SD.ma.length + ' Mitarbeiter, ' + SD.ge.length + ' Geräte · Stand ' + dateDe(SD.stand) : '–'}</div></div><button class="btn small ghost" data-view="settings">Ändern</button></div>
+   <button class="btn ghost small full" style="margin-top:8px" data-act="sync">🔄 Daten übertragen (PC ⇄ Handy)</button></div>
   <p class="small" style="text-align:center">Version ${APP_VERSION}</p>`;
 }
 function histItem(h) { return `<div class="it"><div><b>${wtag(h.datum)}, ${dateDe(h.datum)}</b> · ${esc(h.baunr)}<br><span class="small">${esc(h.baustelle)} · ${h.weg === 'upload' ? 'direkt übertragen' : 'per E-Mail geteilt'} ${h.gesendet ? new Date(h.gesendet).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span></div><div style="display:flex;gap:6px;flex:none"><button class="btn small ghost" data-vorlage="${h.id}">Vorlage</button><button class="btn small ghost" data-resend="${h.id}">Erneut</button></div></div>` }
@@ -325,9 +326,17 @@ async function ocrLesen(file, status) {
   const w = await ocrInit(), bmp = await createImageBitmap(file);
   status('Ausrichtung wird geprüft …');
   await w.setParameters({ tessedit_pageseg_mode: '3' });
-  let rot = 0, best = (await w.recognize(ocrCanvas(bmp, 0, 'c', 1400))).data.confidence;
-  if (best < 70) for (const r of [90, 270]) { const cf = (await w.recognize(ocrCanvas(bmp, r, 'c', 1400))).data.confidence; if (cf > best + 5) { best = cf; rot = r } }
-  if (best < 50) { const cf = (await w.recognize(ocrCanvas(bmp, 180, 'c', 1400))).data.confidence; if (cf > best + 5) { best = cf; rot = 180 } }
+  // Maß für „lesbar“: Anzahl echter Wörter (ein auf dem Kopf liegender Beleg liefert nur Zeichensalat, oft trotz mittlerer Konfidenz)
+  const woerter = t => (t.match(/(^|\s)[A-ZÄÖÜa-zäöüß][a-zäöüß]{3,}[.,:]?(?=\s|$)/g) || []).length;
+  const probe = async r => { const d = (await w.recognize(ocrCanvas(bmp, r, 'c', 1400))).data; return { r, q: woerter(d.text || ''), cf: d.confidence } };
+  const p0 = await probe(0); let rot = 0;
+  if (p0.cf < 80 || p0.q < 12) {
+    // Tesseract liest eine um 90° gedrehte Seite oft halb mit. Daher alle vier Lagen prüfen: Die richtige Lage r ist die,
+    // bei der r und r+90° zusammen die meisten echten Wörter liefern (aufrecht: 0+90, kopfüber: 180+270, quer: 90+180 …)
+    const p = { 0: p0 }; for (const r of [90, 180, 270]) p[r] = await probe(r);
+    const sc = r => p[r].q * p[r].cf + p[(r + 90) % 360].q * p[(r + 90) % 360].cf;
+    rot = [0, 90, 180, 270].reduce((a, b) => sc(b) > sc(a) ? b : a, 0);
+  }
   const passes = [['a', '6', 2600], ['c', '6', 2000], ['g', '3', 2600], ['a', '11', 2600]]; let text = '', res = null;
   for (let i = 0; i < passes.length; i++) {
     const [mode, psm, mx] = passes[i];
@@ -343,7 +352,7 @@ async function ocrLesen(file, status) {
 // Ausgeschriebene Firmennamen → Kürzel aus den Stammdaten (z. B. Moränekieswerk Baustetten → MKB)
 const LIEF_ALIAS = { MKB: ['moränekieswerk', 'moranekieswerk', 'moraenekieswerk', 'moränekies baustetten', 'kieswerk baustetten'], BSR: ['baustoffrecycling', 'baustoff-recycling', 'baustoff recycling'],
   'a+b': ['a+b asphalt', 'asphalt- und betonmischwerke', 'asphalt und betonmischwerke', 'splittwerk ingoldingen'], SWK: ['schotterwerk kirchen'], GeRe: ['gere transporte', 'gerold rehm'],
-  Mantz: ['hubert mantz', 'fuhrunternehmen mantz'], Kessler: ['paul kessler', 'baggerbetrieb kessler'], 'Ehinger Beton': ['ehinger beton', 'tbw-ehingen', 'transportbetonwerk ehingen'] };
+  Mantz: ['hubert mantz', 'fuhrunternehmen mantz'], Kessler: ['paul kessler', 'baggerbetrieb kessler'], DAM: ['donau-asphalt', 'donau asphalt', 'asphalt-mischwerke', 'waage-dam'], 'Ehinger Beton': ['ehinger beton', 'tbw-ehingen', 'transportbetonwerk ehingen'] };
 const MORPH = /(moräne|morane|kies|sand|splitt|schotter|werk|stoff|recycling|beton|asphalt|misch|bau|transport|handel|erd|tief|fuhr|unternehmen|gesellschaft)/gi;
 function liefKurz(text) {   // findet zu einem Firmennamen das Kürzel aus den Stammdaten
   if (!text) return ''; const low = String(text).toLowerCase(), SDL = (SD && SD.lief) || [];
@@ -374,6 +383,14 @@ function regieStunden(t) {
   if (z.length >= 2 && z[1] > z[0]) return r2(z[1] - z[0]);
   return null;
 }
+// Ankreuzfelder „3-Achser / 4-Achser / Sattel“: leere Kästchen erscheinen im Text als [ ], [_], [1 …, das angekreuzte nicht
+function angekreuzt(t) {
+  const opt = [[/3\s*-?\s*a.?.?\s?s\s*er/gi, 'LKW 3-Achser'], [/4\s*-?\s*a.?.?\s?s\s*er/gi, 'LKW 4-Achser'], [/sattel/gi, 'Sattelzug'], [/tra[ck]+tor/gi, 'Traktor']];
+  const score = {};
+  for (const [re, n] of opt) for (const m of t.matchAll(re)) { const vor = t.slice(Math.max(0, m.index - 4), m.index); const leer = /[\[(][_\-—–1lI|\s]?[\])]?\s*$/.test(vor) && !/x/i.test(vor); score[n] = (score[n] || 0) + (leer ? -1 : 1) }
+  const k = Object.entries(score).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  return k.length && (k.length === 1 || k[0][1] > k[1][1]) ? k[0][0] : '';
+}
 function regieMaterial(t, def) { const f = MIET_RE.find(([re]) => re.test(t)); return f ? f[1] : def || '' }
 // Asphaltsorte wie „AC 11 DS 50/70“ → Stammdaten-Material „AC 11 DS“ (bzw. nächstliegende Sorte)
 function asphaltSorte(t) {
@@ -392,6 +409,22 @@ const LS_PROFILE = [
       else { const ks = [...t.matchAll(/\b(\d{4,6})\s*[k&xX]?\s?[g9]\b/g)].map(x => +x[1]).filter(x => x >= 1000); if (ks.length) o.menge = r2(Math.min(...ks) / 1000) }
       if ((m = t.match(/mat\.?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
       return o } },
+  // DAM Donau-Asphalt-Mischwerke (Heim-Gruppe), Wiegeschein: Nummer 26-51-12092, Sorte, Netto = Brutto − Tara
+  { id: 'DAM', name: 'DAM Donau-Asphalt-Mischwerke', lief: 'DAM', re: /donau\s*-?\s*asp\s*h?alt|asphalt-?\s*mischwerke|waage-dam|heim-gruppe|\bDAM\b/i, einh: 'to',
+    lese(t) { const o = {}; let m;
+      const nr = [...t.matchAll(/\b(\d{2}-\d{2}-\d{4,6})\b/g)].map(x => x[1]).sort((a, b) => b.length - a.length); if (nr.length) { o.ls = nr[0]; if (/-\d{4}$/.test(o.ls)) o.lsUnsicher = true }
+      const tt = t.replace(/(\d{1,2})\s*[‚,.]\s*(\d{3})\s*(t|to)\b/g, '$1,$2 t');
+      const w = [...tt.matchAll(/\b(\d{1,2},\d{3}) t\b/g)].map(x => zahlDe(x[1]));
+      for (let i = 0; i + 1 < w.length && o.menge == null; i++) { const n = r2(w[i] - w[i + 1]); if (n > 0.5 && n < 35 && (w[i + 2] == null || Math.abs(w[i + 2] - n) < 0.05 || w[i] > 20)) o.menge = n }
+      if ((m = tt.match(/netto\w*\s*:?[\s\S]{0,60}?\b(\d{1,2},\d{3}) t/i)) && o.menge == null) o.menge = zahlDe(m[1]);
+      const s = asphaltSorte(t); if (s) Object.assign(o, s);
+      return o } },
+  // a+b Lieferschein/Rapport für LKW (Transportauftrag): Menge = Stunden, Material = angekreuzter LKW-Typ
+  { id: 'a+b-Rapport', name: 'a+b Lieferschein/Rapport (LKW-Stunden)', lief: 'a+b', miete: true, chips: mietChips,
+    re: /^(?=[\s\S]*(?:a\s*\+\s*b\s*asphalt|betonmischwerke|ingoldingen|winterstetter))(?=[\s\S]*(?:achser|sattel|spediteur|rapport|kennzeichen))(?![\s\S]*ausgangs\s*-?\s*lieferschein)/i,
+    lese(t) { const o = {}; let m;
+      const nr = [...t.matchAll(/\bnr\.?\s*:?\s*(\d{5,6})\b/gi)].map(x => x[1]); if (nr.length) o.ls = nr.sort((a, b) => nr.filter(x => x === b).length - nr.filter(x => x === a).length)[0];
+      o.mat = angekreuzt(t) || ''; o.menge = regieStunden(t); return o } },
   { id: 'a+b', name: 'a+b Asphalt- und Betonmischwerke', lief: 'a+b', re: /a\s*\+\s*b\s*asphalt|asphalt-?\s*und\s*betonmischwerke|splittwerk\s*ingoldingen|ausgangslieferschein/i, einh: 'to',
     lese(t) { const o = {}; let m;
       if ((m = t.match(/ausgangs\s*-?\s*lieferschein\s*nr\.?\s*:?\s*(\d{5,7})/i))) o.ls = m[1];
@@ -526,7 +559,7 @@ function parseLieferschein(text) {
     out.profil = P.id; out.profilName = P.name; out.miete = !!P.miete;
     const o = P.lese(t);
     if (P.nurProfil) { delete out.ls; delete out.menge; delete out.mat }
-    for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'pos']) if (o[k] != null && o[k] !== '') out[k] = o[k];
+    for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'pos', 'lsUnsicher']) if (o[k] != null && o[k] !== '') out[k] = o[k];
     if (P.miete) { out.einh = 'Std'; if (!o.mat) delete out.mat; if (o.menge == null) delete out.menge; out.matnr = '' }
     else if (!out.einh) out.einh = o.einh || P.einh;
     if (o.mat && !o.matnr) { const sm = SD.mat.find(x => x[0].toLowerCase() === String(o.mat).toLowerCase()); out.matnr = sm ? sm[1] : ''; if (sm) out.einh = o.einh || sm[2] }
@@ -534,7 +567,7 @@ function parseLieferschein(text) {
   // Gelerntes je Lieferant: Einheit / Miete
   const L = out.lief && LERN.lief[out.lief];
   if (L) { if (!out.einh && L.einh) out.einh = L.einh; if (!P && L.miete > L.n / 2) { out.miete = true; out.einh = 'Std' } }
-  const dm = t.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
+  const dm = [...t.matchAll(/\b(\d{1,2})\.(\d{1,2})\.(\d{2}|20\d{2})\b/g)].find(x => +x[1] >= 1 && +x[1] <= 31 && +x[2] >= 1 && +x[2] <= 12); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
   ['ls', 'menge', 'mat', 'lief'].forEach(k => { if (out[k] != null && out[k] !== '') out.felder.push(k) });
   return out;
 }
@@ -548,7 +581,8 @@ async function scanLieferscheine(files, zielId, ziel) {
     if (!m) { const l = r.material[r.material.length - 1]; m = { id: uid(), ap: l ? l.ap : r.aps[0].id, lief: '', mat: '', matnr: '', einh: '', ls: '', menge: '', fotos: [] }; r.material.push(m) }
     try {
       m.fotos.push(await fotoKomprimieren(f));
-      const { text, res } = await ocrLesen(f, s => { const e = $('#ocrp'); if (e) e.textContent = s });
+      const { text, res, rot } = await ocrLesen(f, s => { const e = $('#ocrp'); if (e) e.textContent = s });
+      if (rot) m.fotos[m.fotos.length - 1] = await fotoDrehen(m.fotos[m.fotos.length - 1], rot);   // Anlage im PDF dann richtig herum
       const auto = [];
       if (res.miete && !res.ls) res.ls = 'Regie ' + dShort(res.datum || r.datum, '.');
       if (res.ls && !m.ls) { m.ls = res.ls; auto.push('ls') }
@@ -572,6 +606,12 @@ async function scanLieferscheine(files, zielId, ziel) {
   }
   closeOverlay(); render();
   toast(erkannt ? `${erkannt} von ${files.length} Lieferschein(en) erkannt – gelb markierte Felder bitte prüfen` : 'Text nicht sicher erkannt – bitte Felder ausfüllen', 4000);
+}
+async function fotoDrehen(src, rot) {
+  const im = new Image(); im.src = src; await im.decode();
+  const c = document.createElement('canvas'); if (rot % 180) { c.width = im.height; c.height = im.width } else { c.width = im.width; c.height = im.height }
+  const x = c.getContext('2d'); x.translate(c.width / 2, c.height / 2); x.rotate(rot * Math.PI / 180); x.drawImage(im, -im.width / 2, -im.height / 2);
+  return c.toDataURL('image/jpeg', 0.72);
 }
 async function fotoKomprimieren(f) {
   const bmp = await createImageBitmap(f); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
@@ -963,6 +1003,52 @@ function lsPicker(r) {
     const n = lsInBericht(r, lsTag(b, d), apId); el.remove(); saveDraft(); render();
     toast(`${n} Lieferschein(e) vom ${dateDe(d)} übernommen${d !== r.datum ? ' – im Bericht mit Datum gekennzeichnet' : ''}`, 4000);
   });
+}
+
+// ---------------------------------------------------------------- Daten übertragen (PC ⇄ Handy) per Sync-Datei
+const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'lsliste', 'lernen', 'berufe', 'stammdaten', 'settings'];
+function syncDialog() {
+  overlay(`<b style="font-size:18px">🔄 Daten übertragen</b>
+  <p class="small" style="text-align:left">Damit PC und Handy denselben Stand haben:<br>1. Auf dem Gerät mit den neuesten Daten <b>Sync-Datei speichern</b> (z. B. in OneDrive oder per Mail an dich selbst).<br>2. Auf dem anderen Gerät <b>Sync-Datei einlesen</b>.<br>Es wird zusammengeführt, nichts gelöscht: gesendete Berichte, Lieferschein-Liste und Gelerntes von beiden Geräten bleiben erhalten; bei Entwürfen gilt der neuere.</p>
+  <button class="btn orange full" data-act="syncexport">💾 Sync-Datei speichern</button>
+  <label class="btn ghost full" style="margin-top:8px">📂 Sync-Datei einlesen<input type="file" data-syncimport="1" accept=".json,.txt,application/json,text/plain" hidden></label>
+  <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Schließen</button>`);
+}
+async function syncExport() {
+  flushDraft(); if (S.r) await DB.set(draftKey(S.r), S.r);
+  const d = { format: 'schwall-sync', version: 1, app_version: APP_VERSION, erstellt: new Date().toISOString(), polier: SET.polier || '', geraet: /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Android/.test(navigator.userAgent) ? 'Android' : 'PC', daten: {} };
+  for (const k of SYNC_KEYS) { const v = await DB.get(k); if (v != null) d.daten[k] = v }
+  const st = new Date(), z = n => String(n).padStart(2, '0');
+  const name = `Schwall-Sync-${(SET.polier || 'Polier').split(',')[0].replace(/[^A-Za-zÄÖÜäöüß]/g, '')}-${st.getFullYear()}${z(st.getMonth() + 1)}${z(st.getDate())}-${z(st.getHours())}${z(st.getMinutes())}.json`;
+  await speichern([new File([JSON.stringify(d)], name, { type: 'application/json' })]);
+}
+const nachId = (a, b, zeit) => { const m = new Map(); [...(a || []), ...(b || [])].forEach(x => { const o = m.get(x.id); if (!o || (zeit(x) || 0) > (zeit(o) || 0)) m.set(x.id, x) }); return [...m.values()] };
+async function syncImport(file) {
+  let d; try { d = JSON.parse(await file.text()) } catch (e) { toast('Datei kann nicht gelesen werden'); return }
+  if (!d || d.format !== 'schwall-sync') { toast('Das ist keine Sync-Datei der Tagesbericht-App'); return }
+  const I = d.daten || {}, L = {}; for (const k of SYNC_KEYS) L[k] = await DB.get(k);
+  if (SET.polier && d.polier && d.polier !== SET.polier && !(await bestaetigen(`Die Datei stammt von „${esc(d.polier)}“, hier ist „${esc(SET.polier)}“ eingerichtet. Trotzdem einlesen?`))) return;
+  const neu = {};
+  neu.history = nachId(L.history, I.history, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)).slice(0, 60);
+  neu.slhistory = nachId(L.slhistory, I.slhistory, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)).slice(0, 30);
+  neu.lsliste = nachId(L.lsliste, I.lsliste, e => (e.uebernommen ? 1e13 : 0) + (e.geaendert || e.zeit || 0));
+  const li = I.lernen || { alias: {}, lief: {} }, ll = L.lernen || { alias: {}, lief: {} }, lief = Object.assign({}, li.lief);
+  Object.entries(ll.lief || {}).forEach(([k, v]) => { if (!lief[k] || (v.n || 0) >= (lief[k].n || 0)) lief[k] = v });
+  neu.lernen = { alias: Object.assign({}, li.alias, ll.alias), lief };
+  neu.berufe = Object.assign({}, I.berufe, L.berufe);
+  if (I.stammdaten && (!L.stammdaten || String(I.stammdaten.stand || '') > String(L.stammdaten.stand || ''))) neu.stammdaten = I.stammdaten;
+  if (!L.settings && I.settings) neu.settings = I.settings;   // Einstellungen nur übernehmen, wenn dieses Gerät noch nicht eingerichtet ist
+  // Entwürfe: bereits gesendete fallen weg, sonst gilt der zuletzt geänderte
+  const gesendet = new Set([...neu.history, ...neu.slhistory].map(h => h.id));
+  for (const k of ['draft', 'draft_sl']) {
+    const a = L[k] && !gesendet.has(L[k].id) ? L[k] : null, b = I[k] && !gesendet.has(I[k].id) ? I[k] : null;
+    if (b && (!a || (b._t || 0) > (a._t || 0))) { if (a && a.id !== b.id && (a.baustelle || a.personal.length) && !(await bestaetigen(`Offener ${k === 'draft' ? 'Tagesbericht' : 'Stundenlohn'}-Entwurf hier (${esc(a.baunr)} ${dateDe(a.datum)}) durch den neueren aus der Datei (${esc(b.baunr)} ${dateDe(b.datum)}) ersetzen?`))) continue; neu[k] = b }
+    else if (!a && L[k]) neu['-' + k] = 1;   // hier bereits gesendet → Entwurf löschen
+  }
+  for (const [k, v] of Object.entries(neu)) { if (k[0] === '-') await DB.del(k.slice(1)); else await DB.set(k, v) }
+  const n = x => (x || []).length;
+  toast(`Eingelesen: ${n(neu.history) - n(L.history)} neue Tagesberichte, ${n(neu.slhistory) - n(L.slhistory)} Stundenlohnberichte, ${n(neu.lsliste) - n(L.lsliste)} Lieferscheine`, 5000);
+  setTimeout(() => location.reload(), 1800);
 }
 
 // ---------------------------------------------------------------- Stundenlohnarbeiten (eigener Bereich, Aufbau wie Formular „Stundenlohnbericht“)
@@ -1369,8 +1455,7 @@ async function share() {
   catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich: ' + e.message); }
 }
 // Dateien nur ablegen (ohne Versand): Laptop → Ordner wählen, iPhone → „In Dateien sichern“, Android → Download-Ordner
-async function speichern() {
-  const { files } = S.prepared;
+async function speichern(files = S.prepared.files) {
   try {
     if (window.showDirectoryPicker && !/Android|iPhone|iPad/i.test(navigator.userAgent)) {
       const dir = await showDirectoryPicker({ id: 'schwall-berichte', mode: 'readwrite' });
@@ -1463,6 +1548,9 @@ document.addEventListener('click', async e => {
     return;
   }
   const a = ds.act; if (!a) return;
+  if (a === 'sync') { syncDialog(); return }
+  if (a === 'syncexport') { await syncExport(); return }
+  if (a === 'ovclose') { closeOverlay(); return }
   if (a === 'slstart' || a === 'ovsl') { closeOverlay(); S.view = 'sl'; render(); scrollTo(0, 0); return }
   if (a === 'slweiter') { slAktiv(S.sl); return }
   if (a === 'slneu') { if (await slErsetzen()) { const n = neuerSL(); const t = tbEntwurf(); if (t && t.baunr) Object.assign(n, { baunr: t.baunr, baustelle: t.baustelle, bauteil: t.bauteil, auftrag: t.bauherr || '' }); slAktiv(n) } return }
@@ -1549,6 +1637,7 @@ document.addEventListener('change', async e => {
     catch (err) { info.innerHTML = `<span style="color:var(--rot)">${esc(err.message)}</span>` }
     return;
   }
+  if (ds.syncimport && t.files[0]) { closeOverlay(); await syncImport(t.files[0]); t.value = ''; return }
   if (ds.lsscan && t.files.length) { await lsScan([...t.files]); t.value = ''; return }
   if (t.id === 'ls_bnr' || t.id === 'ls_dat') { if (t.id === 'ls_bnr') LSV.baunr = t.value.trim(); else LSV.datum = t.value || today(); LSV.offen = null; render(); return }
   if (!S.r) return;
