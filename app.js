@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.16.1';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -191,6 +191,8 @@ function vSettings() {
   <div class="card"><b>Stammdaten</b><div class="hint">${SD ? `${SD.ma.length} Mitarbeiter, ${SD.ge.length} Geräte, ${SD.mat.length} Materialien · Stand ${dateDe(SD.stand)}<br>Quelle: ${esc(SD.quelle || '')}` : 'nicht geladen'}</div>
   <span class="btn ghost full fotobtn">📂 Neue Excel/JSON laden<input type="file" id="s_file" accept=".xlsx,.xlsm,.json"></span><div id="s_info" class="hint"></div></div>
   <div class="card"><b>Gelernte Lieferscheine</b><div class="hint">${Object.keys(LERN.lief).length} Lieferanten, ${Object.keys(LERN.alias).length} Briefköpfe zugeordnet. Die App lernt aus jedem gesendeten Bericht: welcher Briefkopf zu welchem Lieferanten gehört und welches Material dort meist geliefert wird.</div><button class="btn small ghost" data-act="lernreset">Gelerntes zurücksetzen</button></div>
+  <div class="card"><b>Senden testen (Android)</b><p class="hint">Falls beim Senden „Permission denied“ kommt: jeden Knopf einmal antippen und das Teilen-Fenster wieder schließen. Das Ergebnis bitte ans Büro schicken.</p>
+  <div class="grid3"><button class="btn small ghost" data-tst="text">Nur Text</button><button class="btn small ghost" data-tst="pdf">1 PDF</button><button class="btn small ghost" data-tst="txt">1 TXT</button></div><div id="tstout" class="hint" style="white-space:pre-wrap"></div></div>
   <div class="card"><b>Daten auf diesem Handy</b><p class="hint">Entwurf, Verlauf und Stammdaten liegen nur auf diesem Gerät.</p><button class="btn danger full" data-act="reset">Alles auf diesem Handy löschen</button></div>`;
 }
 
@@ -278,8 +280,17 @@ function vAbschluss() {
 }
 function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
 // Baustellen-Nr.: Zahlen-Tastatur zuerst; „ABC“ schaltet auf Buchstaben um (z. B. 26025A)
-const bnrFeld = (attr, v, ph) => `<div class="bnrfeld"><input ${attr} inputmode="${S.bnrABC ? 'text' : 'numeric'}" autocapitalize="characters" autocomplete="off" value="${esc(v)}" placeholder="${ph}"><button type="button" class="btn small ghost" data-kbd="1" title="Tastatur umschalten">${S.bnrABC ? '123' : 'ABC'}</button></div>`;
+const bnrFeld = (attr, v, ph) => `<div class="bnrfeld"><input ${attr} inputmode="${S.bnrABC ? 'text' : 'numeric'}" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" value="${esc(v)}" placeholder="${ph}"><button type="button" class="btn small ghost" data-kbd="1" title="Tastatur umschalten">${S.bnrABC ? '123' : 'ABC'}</button></div>`;
 document.addEventListener('pointerdown', e => { const b = e.target.closest('[data-kbd]'); if (!b) return; e.preventDefault(); const i = b.previousElementSibling; S.bnrABC = !S.bnrABC; i.inputMode = S.bnrABC ? 'text' : 'numeric'; b.textContent = S.bnrABC ? '123' : 'ABC'; i.blur(); setTimeout(() => i.focus(), 30) });
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-tst]'); if (!b) return; const k = b.dataset.tst, out = $('#tstout');
+  const pdf = 'JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDIwMF0+PmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9G';
+  const files = k === 'pdf' ? [new File([Uint8Array.from(atob(pdf), c => c.charCodeAt(0))], 'test.pdf', { type: 'application/pdf' })] : k === 'txt' ? [new File(['Test'], 'test.txt', { type: 'text/plain' })] : null;
+  const info = `${k}: share=${!!navigator.share} canShare=${files ? !!(navigator.canShare && navigator.canShare({ files })) : '-'}`;
+  try { await navigator.share(files ? { files, title: 'Test' } : { title: 'Test', text: 'Test' }); out.textContent += info + ' → OK\n' }
+  catch (err) { out.textContent += `${info} → ${err.name}: ${err.message}\n` }
+  if (!out.dataset.ua) { out.dataset.ua = 1; out.textContent += navigator.userAgent + ' · App ' + APP_VERSION + ' · ' + (standalone() ? 'installiert' : 'Browser') + '\n' }
+});
 const pickBtn = (k, label) => `<button class="btn ghost full" style="justify-content:space-between;font-weight:600" data-pick="${k}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span>▾</span></button>`;
 
 const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace(/[~^]/, '') === k) ? 'ocr' : '';
@@ -800,7 +811,7 @@ function telAblauf() {
   if (!r.von) q('polier', () => 'Wie heißt du?', a => { const p = personenAus(a); if (p.length) { r.von = p[0][0]; return true } return 'Den Namen finde ich nicht in der Liste. Bitte nur den Nachnamen.' });
   q('baustelle', () => TEL.vorlage ? `Baustelle ${r.baunr}, ${r.baustelle}. Stimmt das?` : 'Welche Baustelle? Sag die Baustellen-Nummer.', a => {
     if (TEL.vorlage && ja(a)) return true;
-    const n = (wz(a).replace(/(\d)[\s.]+(?=\d)/g, '$1').match(/\d{3,6}(?:\s?[a-z](?![a-zäöüß]))?/i) || [])[0]?.replace(/\s/g, '').toUpperCase(); const nn = n ? [n] : null; if (!nn) return 'Bitte die Baustellen-Nummer, zum Beispiel 2 6 0 2 5.';
+    const n = (wz(a).replace(/(\d)[\s.]+(?=\d)/g, '$1').match(/\d{3,6}(?:\s?[a-z](?![a-zäöüß]))?/i) || [])[0]?.replace(/\s/g, ''); const nn = n ? [n] : null; if (!nn) return 'Bitte die Baustellen-Nummer, zum Beispiel 2 6 0 2 5.';
     r.baunr = nn[0]; const h = HIST.find(x => x.baunr === r.baunr);
     if (h) { r.baustelle = h.baustelle; r.bauteil = h.bauteil; r.bauherr = h.bauherr; TEL.say = `${h.baustelle}.` }
     else { r.baustelle = ''; Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'bsname', ask: () => 'Die Baustelle kenne ich noch nicht. Wo ist sie, Ort und Auftraggeber?', handle: a => { r.baustelle = a.trim(); return true } }, { id: 'bauherr', ask: () => 'Wer ist der Bauherr? Wenn unklar, sag nein.', handle: a => { if (!nein(a)) r.bauherr = a.trim(); return true } }) }
@@ -1140,7 +1151,6 @@ function pruefeSL(r) {
   if (!r.datum) o.push({ t: 'e', s: 0, m: 'Datum fehlt.' });
   if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (aufgestellt von) fehlt.' });
   if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
-  if (!r.baustelle) o.push({ t: 'e', s: 0, m: 'Baustelle fehlt.' });
   if (!r.auftrag) o.push({ t: 'w', s: 0, m: 'Auftraggeber („Auftrag durch“) fehlt.' });
   if (!r.aps.some(a => (a.text || '').trim())) o.push({ t: 'e', s: 1, m: 'Bitte beschreiben, welche Arbeiten ausgeführt wurden.' });
   if (D.arb.length > 40) o.push({ t: 'w', s: 1, m: `Arbeiten zu lang (${D.arb.length} Zeilen, Platz für 40) – bitte kürzen.` });
@@ -1201,7 +1211,6 @@ function pruefe(r) {
   if (!r.beginn || !r.ende) o.push({ t: 'e', s: 5, m: 'Beginn und Ende der Arbeitszeit angeben.' });
   if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (ausgestellt von) fehlt.' });
   if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
-  if (!r.baustelle) o.push({ t: 'e', s: 0, m: 'Baustelle fehlt.' });
   if (!r.wetter) o.push({ t: 'e', s: 0, m: 'Wetter fehlt (Pflicht fürs Bautagebuch).' });
   if (r.temp === '') o.push({ t: 'w', s: 0, m: 'Temperatur fehlt.' });
   r.aps.forEach((a, i) => {
