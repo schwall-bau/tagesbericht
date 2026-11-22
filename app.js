@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -11,8 +11,8 @@ const DB = {
   db: null,
   open() { return this.db ? Promise.resolve(this.db) : new Promise((res, rej) => { const r = indexedDB.open('schwall-tb', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => { this.db = r.result; res(this.db) }; r.onerror = () => rej(r.error) }) },
   async get(k) { const db = await this.open(); return new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) }) },
-  async set(k, v) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error) }) },
-  async del(k) { const db = await this.open(); return new Promise(res => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = () => res() }) }
+  async set(k, v) { if (LADEFEHLER && ['history', 'slhistory', 'queue', 'lsliste'].includes(k)) throw new Error('Gespeicherte Daten konnten beim Start nicht gelesen werden – bitte App neu öffnen.'); const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Speichern abgebrochen (Speicher voll?)')) }) },
+  async del(k) { const db = await this.open(); return new Promise(res => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = () => res(); t.onerror = t.onabort = () => res() }) }
 };
 
 // ---------------------------------------------------------------- Hilfsfunktionen
@@ -47,16 +47,19 @@ const S = { view: 'home', step: 0, r: null, doc: 'tb', prepared: null, sl: null,
 let SLHIST = [];          // gesendete Stundenlohnberichte
 let BERUF = {};
 let FAV = {}, HAEUFIG = {};   // Favoriten und Zähler „häufig gewählt“ je Liste (Mitarbeiter, Geräte, Material, Lieferant)           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
-let saveTimer = null;
+let saveTimer = null, NOFLUSH = false, LADEFEHLER = false;
+const hatInhalt = r => !!r && !!(r.baunr || r.baustelle || r.personal.length || r.geraete.length || r.material.length || r.aps.some(a => a.nr || a.text) || r.bem || r.vork);
 const draftKey = r => r && r.typ === 'sl' ? 'draft_sl' : 'draft';
-function saveDraft() { clearTimeout(saveTimer); if (S.r) S.r._t = Date.now(); saveTimer = setTimeout(() => { if (S.r) DB.set(draftKey(S.r), S.r) }, 400) }
-const flushDraft = () => { clearTimeout(saveTimer); if (S.r) DB.set(draftKey(S.r), S.r) };
+function saveDraft() { clearTimeout(saveTimer); if (S.r) S.r._t = Date.now(); saveTimer = setTimeout(() => { if (S.r && !NOFLUSH) DB.set(draftKey(S.r), S.r) }, 400) }
+const flushDraft = () => { clearTimeout(saveTimer); if (S.r && !NOFLUSH) DB.set(draftKey(S.r), S.r); if (window.__lst) { clearTimeout(window.__lst); window.__lst = null; lsSpeichern() } };
+// Neu laden ohne den Entwurf im Speicher zurückzuschreiben (nach Datenimport / Löschen)
+const neuLadenOhneSichern = () => { NOFLUSH = true; clearTimeout(saveTimer); S.r = S.tb = S.sl = null; location.reload() };
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushDraft() });
 window.addEventListener('pagehide', flushDraft);
 
 function neuerBericht() {
   return { id: uid(), datum: today(), von: SET.polier || '', baustelle: '', bauteil: '', baunr: '', bauherr: '', wetter: '', temp: '', wasser: '',
-    beginn: '07:00', ende: '16:30', pause: '0:30', aps: [{ id: uid(), nr: '', text: '' }], personal: [], geraete: [], material: [], bem: '', vork: '', sig: '' };
+    beginn: '07:00', ende: '17:00', pause: '0:45', aps: [{ id: uid(), nr: '', text: '' }], personal: [], geraete: [], material: [], bem: '', vork: '', sig: '' };
 }
 
 // ---------------------------------------------------------------- Stammdaten-Import (Excel-Vorlage oder JSON)
@@ -96,14 +99,14 @@ async function init() {
     FAV = await DB.get('favoriten') || {}; HAEUFIG = await DB.get('haeufig') || {}; SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
     HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
-  } catch (e) { console.error(e) }
+  } catch (e) { console.error(e); LADEFEHLER = true; setTimeout(() => toast('⚠️ Gespeicherte Daten konnten nicht gelesen werden. Bitte App schließen und neu öffnen, bevor du sendest.', 8000), 500) }
   S.view = SD ? 'home' : 'setup';
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     const hatteSW = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update(); setInterval(() => reg.update(), 30 * 60000) }).catch(() => { });
     // neue Version aktiv → einmal neu laden (Entwurf ist gespeichert)
-    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hatteSW && !window._reloaded) { window._reloaded = true; flushDraft(); location.reload() } });
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hatteSW || window._reloaded) return; const neu = () => { window._reloaded = true; flushDraft(); location.reload() }; if (S.view === 'home' && !document.querySelector('.sheet')) neu(); else { window._updateWartet = neu; toast('Neue Version geladen – wird aktiv, sobald du zur Startseite gehst.', 4000) } });
   }
   window.addEventListener('online', () => { sendQueue(true); ocrVorladen() });
   if (SD) setTimeout(ocrVorladen, 3000);
@@ -118,6 +121,7 @@ const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.
 const STEPS = [['Kopf', '📋'], ['Pakete', '🛣️'], ['Personal', '👷'], ['Geräte', '🚜'], ['Material', '🧾'], ['Abschluss', '✅']];
 const STEPS_SL = [['Kopf', '📋'], ['Arbeiten', '🛠️'], ['Personal', '👷'], ['Geräte', '🚜'], ['Material', '🧾'], ['Abschluss', '✅']];
 function render() {
+  if (window._updateWartet && S.view === 'home' && !document.querySelector('.sheet')) { const f = window._updateWartet; window._updateWartet = null; return f() }
   if (S.r && S.r.typ === 'sl' && !['sl', 'erfassung'].includes(S.view)) { S.sl = S.r; S.r = S.tb || null; S.tb = null; S.doc = 'tb' }   // Stundenlohn verlassen → Tagesbericht-Entwurf wieder aktiv
   const hb = $('#hbtn'); hb.style.display = 'none';
   $('#steps').style.display = 'none'; $('#foot').style.display = 'none'; $('#hsub').textContent = '';
@@ -146,7 +150,7 @@ function render() {
 
 // ---------------------------------------------------------------- Startseite / Einrichtung / Einstellungen
 function vHome() {
-  const draft = S.r && S.r._draft !== false && (S.r.baustelle || S.r.personal.length) ? S.r : null;
+  const draft = S.r && S.r._draft !== false && hatInhalt(S.r) ? S.r : null;
   return `${!standalone() ? `<div class="demo"><b>Als App installieren:</b> ${isIOS() ? 'In Safari unten auf <b>Teilen</b> (□↑) tippen → <b>„Zum Home-Bildschirm“</b>.' : installEvt ? '<button class="btn small orange" data-act="install">Jetzt installieren</button>' : 'Im Chrome-Menü <b>⋮</b> → <b>„App installieren“</b> bzw. „Zum Startbildschirm hinzufügen“.'}</div>` : ''}
   ${QUEUE.length ? `<div class="demo" style="background:#fdecea;border-color:#f5c2c0;color:#8a1c1c"><b>${QUEUE.length} Bericht(e) warten auf Versand</b> (kein Netz). <button class="btn small" data-act="sendqueue">Jetzt senden</button></div>` : ''}
   <div class="home-hero">
@@ -197,7 +201,7 @@ function vKopf() {
 <div class="card">
  <label style="margin-top:0">Ausgestellt von (Polier)</label>${pickBtn('von', r.von || 'Polier auswählen …')}
  <div class="grid2"><div><label>Datum</label><input type="date" data-f="datum" value="${r.datum}"></div><div><label>Tag</label><input value="${wtag(r.datum)}" disabled></div></div>
- <label>Baustellen-Nr.</label><input data-f="baunr" list="bslist" inputmode="numeric" value="${esc(r.baunr)}" placeholder="z. B. 26025">
+ <label>Baustellen-Nr.</label>${bnrFeld(`data-f="baunr" list="bslist"`, r.baunr, 'z. B. 26025')}
  <datalist id="bslist">${bs.map(h => `<option value="${esc(h.baunr)}">${esc(h.baustelle)}</option>`).join('')}</datalist>
  <label>Baustelle (Ort, Auftraggeber)</label><input data-f="baustelle" value="${esc(r.baustelle)}" placeholder="z. B. Laupheim, Diehl Aviation">
  <label>Bauteil / Bezeichnung</label><input data-f="bauteil" value="${esc(r.bauteil)}" placeholder="z. B. Leichtbauhalle bei Geb. 21 Ost">
@@ -273,6 +277,9 @@ function vAbschluss() {
 <h3>Vorschau</h3>${docViewer(r)}`;
 }
 function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
+// Baustellen-Nr.: Zahlen-Tastatur zuerst; „ABC“ schaltet auf Buchstaben um (z. B. 26025A)
+const bnrFeld = (attr, v, ph) => `<div class="bnrfeld"><input ${attr} inputmode="${S.bnrABC ? 'text' : 'numeric'}" autocapitalize="characters" autocomplete="off" value="${esc(v)}" placeholder="${ph}"><button type="button" class="btn small ghost" data-kbd="1" title="Tastatur umschalten">${S.bnrABC ? '123' : 'ABC'}</button></div>`;
+document.addEventListener('pointerdown', e => { const b = e.target.closest('[data-kbd]'); if (!b) return; e.preventDefault(); const i = b.previousElementSibling; S.bnrABC = !S.bnrABC; i.inputMode = S.bnrABC ? 'text' : 'numeric'; b.textContent = S.bnrABC ? '123' : 'ABC'; i.blur(); setTimeout(() => i.focus(), 30) });
 const pickBtn = (k, label) => `<button class="btn ghost full" style="justify-content:space-between;font-weight:600" data-pick="${k}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span><span>▾</span></button>`;
 
 const ocrF = (m, k) => m.ocr && m.ocr.auto.some(f => f.replace(/[~^]/, '') === k) ? 'ocr' : '';
@@ -284,7 +291,7 @@ function ocrHinweis(m) {
   return `<div class="ocrbox">${o.profil ? `🏷️ Erkannt als: <b>${esc(o.profil)}</b><br>` : ''}${o.miete ? 'Miete/Regie: Menge in <b>Stunden</b>, Fahrzeug unten antippen.' + chips : chips ? 'Material schnell wählen:' + chips : ''}${o.fehler ? 'Texterkennung fehlgeschlagen – bitte von Hand ausfüllen.' : erk.length ? `🔍 Automatisch erkannt: <b>${erk.join(', ')}</b> – bitte prüfen.` : 'Nichts sicher erkannt – bitte von Hand ausfüllen.'}${uebern.length ? `<br>↺ Vom vorherigen Lieferschein übernommen: ${uebern.join(', ')}` : ''}${gel.length ? `<br>🧠 Aus früheren Lieferscheinen dieses Lieferanten: ${gel.join(', ')}` : ''}${o.liefNeu ? '<br>🆕 Lieferant nicht in der Liste – Name aus dem Briefkopf übernommen. Bitte prüfen; die App merkt sich die Zuordnung.' : ''}${dw}
   ${o.text ? `<details><summary>Erkannten Text anzeigen</summary><pre>${esc(o.text)}</pre></details>` : ''}</div>`;
 }
-async function vorlageMitPruefung(h) { if (S.r && (S.r.personal.length || S.r.baustelle) && !(await bestaetigen('Der aktuelle Entwurf wird durch die Vorlage ersetzt. Fortfahren?'))) return; vorlageAus(h) }
+async function vorlageMitPruefung(h) { if (S.r && S.r._draft !== false && hatInhalt(S.r) && !(await bestaetigen('Der aktuelle Entwurf wird durch die Vorlage ersetzt. Fortfahren?'))) return; vorlageAus(h) }
 
 // ---------------------------------------------------------------- Lieferschein-Texterkennung (OCR, läuft auf dem Handy, offline)
 // Feste Ergänzungen der Stammdaten (bleiben auch nach Excel-Import erhalten)
@@ -328,31 +335,38 @@ function ocrCanvas(bmp, rot, mode, max) {
   }
   x.putImageData(d, 0, 0); return c;
 }
-// Ausrichtung erkennen, dann bis zu 3 Durchgänge mit verschiedenen Einstellungen, bis LS-Nr., Menge und Material gefunden sind
+// Schnell lesen: erster Durchgang dient gleichzeitig als Lage-Prüfung. Weitere Durchgänge nur, solange Felder fehlen,
+// und höchstens ca. 25 Sekunden. Gedrehte Fotos: nur dann alle vier Lagen prüfen, wenn der erste Durchgang kaum Wörter liefert.
 async function ocrLesen(file, status) {
-  const w = await ocrInit(), bmp = await createImageBitmap(file);
-  status('Ausrichtung wird geprüft …');
-  await w.setParameters({ tessedit_pageseg_mode: '3' });
-  // Maß für „lesbar“: Anzahl echter Wörter (ein auf dem Kopf liegender Beleg liefert nur Zeichensalat, oft trotz mittlerer Konfidenz)
+  const t0 = Date.now(), w = await ocrInit(), bmp = await createImageBitmap(file);
   const woerter = t => (t.match(/(^|\s)[A-ZÄÖÜa-zäöüß][a-zäöüß]{3,}[.,:]?(?=\s|$)/g) || []).length;
-  const probe = async r => { const d = (await w.recognize(ocrCanvas(bmp, r, 'c', 1400))).data; return { r, q: woerter(d.text || ''), cf: d.confidence } };
-  const p0 = await probe(0); let rot = 0;
-  if (p0.cf < 80 || p0.q < 12) {
-    // Tesseract liest eine um 90° gedrehte Seite oft halb mit. Daher alle vier Lagen prüfen: Die richtige Lage r ist die,
-    // bei der r und r+90° zusammen die meisten echten Wörter liefern (aufrecht: 0+90, kopfüber: 180+270, quer: 90+180 …)
-    const p = { 0: p0 }; for (const r of [90, 180, 270]) p[r] = await probe(r);
+  const fertig = r => r.ls && r.menge != null && r.menge !== '' && (r.mat || r.miete);
+  const lesen = async (rot, mode, psm, mx, nr, von) => {
+    ocrProg = p => status(`Text wird gelesen (${nr}/${von}) … ${Math.round(p * 100)} %`);
+    await w.setParameters({ tessedit_pageseg_mode: psm });
+    const c = ocrCanvas(bmp, rot, mode, mx), d = (await w.recognize(c)).data; c.width = c.height = 0; return d;
+  };
+  status('Text wird gelesen …');
+  // 1. Durchgang: adaptive Schwelle (am besten für Lieferscheine), aufrecht
+  const d0 = await lesen(0, 'a', '6', 2000, 1, 3); let rot = 0, text = d0.text || '';
+  if (woerter(text) < 8 || d0.confidence < 45) {
+    // kaum lesbar → Lage prüfen (kleine, schnelle Probe-Bilder)
+    status('Foto liegt evtl. gedreht – Lage wird geprüft …');
+    await w.setParameters({ tessedit_pageseg_mode: '3' });
+    const probe = async r => { const c = ocrCanvas(bmp, r, 'c', 1000), d = (await w.recognize(c)).data; c.width = c.height = 0; return { r, q: woerter(d.text || ''), cf: d.confidence } };
+    const p = {}; for (const r of [0, 90, 180, 270]) p[r] = await probe(r);
     const sc = r => p[r].q * p[r].cf + p[(r + 90) % 360].q * p[(r + 90) % 360].cf;
     rot = [0, 90, 180, 270].reduce((a, b) => sc(b) > sc(a) ? b : a, 0);
+    if (rot) text = (await lesen(rot, 'a', '6', 2000, 1, 3)).text || '';
   }
-  const passes = [['a', '6', 2600], ['c', '6', 2000], ['g', '3', 2600], ['a', '11', 2600]]; let text = '', res = null;
-  for (let i = 0; i < passes.length; i++) {
-    const [mode, psm, mx] = passes[i];
-    ocrProg = p => status(`Text wird gelesen (${i + 1}/${passes.length}) … ${Math.round(p * 100)} %`);
-    await w.setParameters({ tessedit_pageseg_mode: psm });
-    text += '\n' + ((await w.recognize(ocrCanvas(bmp, rot, mode, mx))).data.text || '');
+  let res = parseLieferschein(text);
+  const weitere = [['c', '6', 2000], ['g', '11', 2400]];
+  for (let i = 0; i < weitere.length && !fertig(res) && Date.now() - t0 < 25000; i++) {
+    const [mode, psm, mx] = weitere[i];
+    text += '\n' + ((await lesen(rot, mode, psm, mx, i + 2, 3)).text || '');
     res = parseLieferschein(text);
-    if (res.ls && res.menge && res.mat) break;
   }
+  if (bmp.close) bmp.close();
   ocrProg = null; return { text, res, rot };
 }
 
@@ -413,8 +427,9 @@ const LS_PROFILE = [
     lese(t) { const o = {}; let m;
       if ((m = t.match(/wiegeschein\D{0,25}(\d{5,7})/i) || t.match(/\b(2\d{5})\b/))) o.ls = m[1];
       if ((m = t.match(/\bN\s*[:;.]\s*(\d{3,6})\s*kg/i))) o.menge = r2(+m[1] / 1000);
+      else if (wiegeNetto(t) != null) o.menge = wiegeNetto(t);
       else { const ks = [...t.matchAll(/\b(\d{4,6})\s*[k&xX]?\s?[g9]\b/g)].map(x => +x[1]).filter(x => x >= 1000); if (ks.length) o.menge = r2(Math.min(...ks) / 1000) }
-      if ((m = t.match(/mat\.?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
+      if ((m = t.match(/mat\.?\s*-?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
       return o } },
   // DAM Donau-Asphalt-Mischwerke (Heim-Gruppe), Wiegeschein: Nummer 26-51-12092, Sorte, Netto = Brutto − Tara
   { id: 'DAM', name: 'DAM Donau-Asphalt-Mischwerke', lief: 'DAM', re: /donau\s*-?\s*asp\s*h?alt|asphalt-?\s*mischwerke|waage-dam|heim-gruppe|\bDAM\b/i, einh: 'to',
@@ -618,12 +633,12 @@ async function fotoDrehen(src, rot) {
   const im = new Image(); im.src = src; await im.decode();
   const c = document.createElement('canvas'); if (rot % 180) { c.width = im.height; c.height = im.width } else { c.width = im.width; c.height = im.height }
   const x = c.getContext('2d'); x.translate(c.width / 2, c.height / 2); x.rotate(rot * Math.PI / 180); x.drawImage(im, -im.width / 2, -im.height / 2);
-  return c.toDataURL('image/jpeg', 0.72);
+  const u = c.toDataURL('image/jpeg', 0.72); c.width = c.height = 0; return u;
 }
 async function fotoKomprimieren(f) {
   const bmp = await createImageBitmap(f); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return c.toDataURL('image/jpeg', 0.72);
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); if (bmp.close) bmp.close();
+  const u = c.toDataURL('image/jpeg', 0.72); c.width = c.height = 0; return u;
 }
 function ocrVorladen() { if (!navigator.onLine) return; ['worker.min.js', 'deu.traineddata.gz', 'tesseract-core-simd-lstm.wasm.js', 'tesseract-core-lstm.wasm.js'].forEach(f => fetch('vendor/tesseract/' + f).catch(() => { })) }
 
@@ -674,17 +689,19 @@ const TEL = { log: [], queue: [], rec: null, listening: false, voice: true, auto
 function levD(a, b, max) { let prev = Array.from({ length: b.length + 1 }, (_, i) => i); for (let i = 1; i <= a.length; i++) { const cur = [i]; let mn = i; for (let j = 1; j <= b.length; j++) { cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); if (cur[j] < mn) mn = cur[j] } if (mn > max) return max + 1; prev = cur } return prev[b.length] }
 const ZW = { null: 0, ein: 1, eins: 1, eine: 1, einen: 1, einer: 1, zwei: 2, zwo: 2, drei: 3, vier: 4, 'fünf': 5, fuenf: 5, sechs: 6, sieben: 7, acht: 8, neun: 9, zehn: 10, elf: 11, 'zwölf': 12, dreizehn: 13, vierzehn: 14, 'fünfzehn': 15, sechzehn: 16, siebzehn: 17, achtzehn: 18, neunzehn: 19, zwanzig: 20, 'dreißig': 30, vierzig: 40, 'fünfundvierzig': 45, 'fünfzig': 50 };
 function wz(s) {   // Zahlwörter → Ziffern
-  s = ' ' + String(s).toLowerCase().replace(/anderthalb|eineinhalb/g, '1.5').replace(/([a-zäöüß]+)einhalb/g, (m, w) => ZW[w] != null ? (ZW[w] + 0.5) : m) + ' ';
+  s = ' ' + String(s).toLowerCase().replace(/\b(drei|3)\s+viertel/g, 'dreiviertel').replace(/anderthalb|eineinhalb/g, '1.5').replace(/([a-zäöüß]+)einhalb/g, (m, w) => ZW[w] != null ? (ZW[w] + 0.5) : m) + ' ';
   s = s.replace(/(\d+)\s*komma\s*(\d+)/g, '$1.$2').replace(/(\d),(\d)/g, '$1.$2');
   return s.split(/(\s+)/).map(w => ZW[w.replace(/[.,!?]/g, '')] != null ? String(ZW[w.replace(/[.,!?]/g, '')]) : w).join('').replace(/(\d+)\s*komma\s*(\d+)/g, '$1.$2').trim();
 }
-const ja = a => /^\s*(ja|jo|jap|jawohl|genau|richtig|stimmt|passt|ok|okay|korrekt|klar|sicher|gerne|ja klar|auf jeden)/i.test(a);
-const nein = a => /^\s*(nein|nee|ne\b|nö|falsch|nicht|keine?|nichts|negativ|ohne)/i.test(a);
+const ja = a => /^\s*(ja|jo|jap|jawohl|genau|richtig|stimmt|passt|ok|okay|korrekt|klar|sicher|gerne|ja klar|auf jeden)(?![a-zäöüß])/i.test(a);
+const nein = a => /^\s*(nein|nee|ne|nö|falsch|nicht|keine?|nichts|negativ|ohne)(?![a-zäöüß])/i.test(a);
+const nurNein = a => /^\s*(nein|nee|ne|nö|nichts|keine?|negativ)(\s*,?\s*(danke|nichts|gibt'?s nicht|war nichts))?\s*[.!]?\s*$/i.test(a);
 const zahl = a => { const m = wz(a).match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null };
 function stunden(a) {
   const s = wz(a); let m;
-  if ((m = s.match(/(\d+(?:\.\d+)?)\s*(?:stunden?|h)?\s*(?:und)?\s*(\d+)\s*min/))) return +m[1] + m[2] / 60;
-  let h = zahl(s); if (h == null) return null;
+  if ((m = s.match(/(\d+(?:\.\d+)?)\s*(?:stunden?|h)\s*(?:und)?\s*(\d+)\s*min/))) return +m[1] + m[2] / 60;
+  if ((m = s.match(/^\D*(\d+)\s*min/))) return +m[1] / 60;
+  let h = zahl(s); if (h == null) return /dreiviertel/.test(s) ? 0.75 : /halbe/.test(s) ? 0.5 : /viertel/.test(s) ? 0.25 : null;
   if (/dreiviertel|drei viertel/.test(s)) h += 0.75; else if (/\bhalb/.test(s) && !/\.\d/.test(String(h))) h += 0.5; else if (/viertel/.test(s)) h += 0.25;
   return h;
 }
@@ -783,8 +800,8 @@ function telAblauf() {
   if (!r.von) q('polier', () => 'Wie heißt du?', a => { const p = personenAus(a); if (p.length) { r.von = p[0][0]; return true } return 'Den Namen finde ich nicht in der Liste. Bitte nur den Nachnamen.' });
   q('baustelle', () => TEL.vorlage ? `Baustelle ${r.baunr}, ${r.baustelle}. Stimmt das?` : 'Welche Baustelle? Sag die Baustellen-Nummer.', a => {
     if (TEL.vorlage && ja(a)) return true;
-    const n = wz(a).match(/\d{3,6}/); if (!n) return 'Bitte die Baustellen-Nummer, zum Beispiel 2 6 0 2 5.';
-    r.baunr = n[0]; const h = HIST.find(x => x.baunr === r.baunr);
+    const n = (wz(a).replace(/(\d)[\s.]+(?=\d)/g, '$1').match(/\d{3,6}(?:\s?[a-z](?![a-zäöüß]))?/i) || [])[0]?.replace(/\s/g, '').toUpperCase(); const nn = n ? [n] : null; if (!nn) return 'Bitte die Baustellen-Nummer, zum Beispiel 2 6 0 2 5.';
+    r.baunr = nn[0]; const h = HIST.find(x => x.baunr === r.baunr);
     if (h) { r.baustelle = h.baustelle; r.bauteil = h.bauteil; r.bauherr = h.bauherr; TEL.say = `${h.baustelle}.` }
     else { r.baustelle = ''; Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'bsname', ask: () => 'Die Baustelle kenne ich noch nicht. Wo ist sie, Ort und Auftraggeber?', handle: a => { r.baustelle = a.trim(); return true } }, { id: 'bauherr', ask: () => 'Wer ist der Bauherr? Wenn unklar, sag nein.', handle: a => { if (!nein(a)) r.bauherr = a.trim(); return true } }) }
     return true;
@@ -812,12 +829,12 @@ function telAblauf() {
     if (TEL.vorlage && r.personal.length && ja(a)) return true;
     if (/wie (gestern|letztes|zuletzt|immer)|gleiche/i.test(a) && H) { r.personal = H.personal.map(p => ({ id: uid(), name: p.name, nr: p.nr, zus: '', h: {} })); TEL.say = `Übernommen: ${namenListe(r.personal)}.`; return true }
     const p = personenAus(a); const ohne = /ohne|nicht|fehlt|weg/i.test(a);
-    if (!p.length) { const kol = TEL.cur; const nm = a.replace(/^(dazu|plus|auch|noch)\s+/i, '').trim(); if (nm.split(/\s+/).length <= 3 && !ohne) { Q.splice(Q.indexOf(TEL.cur), 0, { id: 'neuma', ask: () => `${nm} finde ich nicht in der Liste. Als neuen Mitarbeiter eintragen?`, handle: c => { if (ja(c)) { if (!/dazu|plus|auch|noch/i.test(a)) r.personal = []; r.personal.push({ id: uid(), name: nm, nr: '', zus: '', h: {}, neu: true }); Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok2', ask: () => `Ich habe: ${namenListe(r.personal)}. Noch jemand? Sonst sag nein.`, handle: d => { if (nein(d) || ja(d) && d.trim().split(/\s+/).length < 2) return true; const pp = personenAus(d); pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.pushneuP(m) }); if (!pp.length) r.personal.push({ id: uid(), name: d.replace(/^(dazu|plus|und)\s+/i, '').trim(), nr: '', zus: '', h: {}, neu: true }); return `Jetzt: ${namenListe(r.personal)}. Noch jemand?` } }); } else Q.splice(Q.indexOf(TEL.cur) + 1, 0, kol); return true } }); return true } return 'Ich habe keinen Namen erkannt. Bitte die Nachnamen nennen.' }
+    if (!p.length) { const kol = TEL.cur; const nm = a.replace(/^(dazu|plus|auch|noch)\s+/i, '').trim(); if (nm.split(/\s+/).length <= 3 && !ohne) { Q.splice(Q.indexOf(TEL.cur), 0, { id: 'neuma', ask: () => `${nm} finde ich nicht in der Liste. Als neuen Mitarbeiter eintragen?`, handle: c => { if (ja(c)) { if (!/dazu|plus|auch|noch/i.test(a)) r.personal = []; r.personal.push({ id: uid(), name: nm, nr: '', zus: '', h: {}, neu: true }); Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok2', ask: () => `Ich habe: ${namenListe(r.personal)}. Noch jemand? Sonst sag nein.`, handle: d => { if (nein(d) || ja(d) && d.trim().split(/\s+/).length < 2) return true; const pp = personenAus(d); pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.push(neuP(m)) }); if (!pp.length) r.personal.push({ id: uid(), name: d.replace(/^(dazu|plus|und)\s+/i, '').trim(), nr: '', zus: '', h: {}, neu: true }); return `Jetzt: ${namenListe(r.personal)}. Noch jemand?` } }); } else Q.splice(Q.indexOf(TEL.cur) + 1, 0, kol); return true } }); return true } return 'Ich habe keinen Namen erkannt. Bitte die Nachnamen nennen.' }
     const neu = m => neuP(m);
     if (ohne && r.personal.length) r.personal = r.personal.filter(x => !p.some(m => m[0] === x.name));
     else if (/dazu|plus|auch|noch/i.test(a)) p.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.push(neu(m)) });
     else r.personal = p.map(neu);
-    Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok', ask: () => `Ich habe: ${namenListe(r.personal)}. Stimmt das?`, handle: b => { if (ja(b)) return true; const pp = personenAus(b); if (!pp.length) return 'Wen soll ich ergänzen oder streichen? Zum Beispiel: ohne Braun, oder: dazu Hagel.'; if (/ohne|nicht|weg|streich/i.test(b)) r.personal = r.personal.filter(x => !pp.some(m => m[0] === x.name)); else pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.pushneuP(m) }); return `Jetzt: ${namenListe(r.personal)}. Stimmt das?` } });
+    Q.splice(Q.indexOf(TEL.cur) + 1, 0, { id: 'kolok', ask: () => `Ich habe: ${namenListe(r.personal)}. Stimmt das?`, handle: b => { if (ja(b)) return true; const pp = personenAus(b); if (!pp.length) return 'Wen soll ich ergänzen oder streichen? Zum Beispiel: ohne Braun, oder: dazu Hagel.'; if (/ohne|nicht|weg|streich/i.test(b)) r.personal = r.personal.filter(x => !pp.some(m => m[0] === x.name)); else pp.forEach(m => { if (!r.personal.some(x => x.name === m[0])) r.personal.push(neuP(m)) }); return `Jetzt: ${namenListe(r.personal)}. Stimmt das?` } });
     return true;
   });
   q('abwesend', () => 'War jemand krank, im Urlaub oder Schlechtwetter?', a => {
@@ -837,7 +854,7 @@ function telAblauf() {
     return true;
   });
   q('stdfertig', () => { if (!r.aps.length || !r.personal.length) return ''; if (!TEL.split) TEL.split = { [r.aps[0].id]: 1 }; if (TEL.std == null) TEL.std = dauer(r); const last = r.aps[r.aps.length - 1]; if (r.aps.length > 1) { const used = r.aps.slice(0, -1).reduce((s, a) => s + (TEL.split[a.id] || 0), 0); TEL.split[last.id] = Math.max(0, dauer(r) - used) } r.personal.forEach(p => { if (!p.zus) p.h = verteilen(r, TEL.std) }); return `${r.aps.length > 1 ? 'Rest auf AP ' + last.nr + '. ' : ''}Hat jemand abweichende Stunden? Zum Beispiel: Mustermann 8 Stunden. Sonst nein.` }, a => {
-    if (nein(a)) return true; const p = personenAus(a), h = stunden(a.replace(/^[^\d]*?(?=\d|ein|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf)/i, ''));
+    if (nein(a)) return true; const p = personenAus(a), h = stunden(a.replace(/^[^\d]*?(?=\d|(?:^|\s)(?:ein|eine|einer|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|halbe?|dreiviertel)(?![a-zäöüß]))/i, ''));
     if (!p.length || h == null) return 'Bitte Name und Stunden, oder nein.';
     p.forEach(m => { const x = r.personal.find(y => y.name === m[0]); if (x) { x.zus = ''; x.h = verteilen(r, h) } });
     return `${namenListe(p)}: ${fmt(h)} Stunden. Noch jemand?`;
@@ -858,8 +875,8 @@ function telAblauf() {
     return true;
   });
   q('mat', () => 'Gab es heute Lieferscheine? Die fotografierst du gleich danach.', a => { TEL.mat = !nein(a); return true });
-  q('bem', () => 'Bemerkungen oder abweichende Arbeitszeiten? Sonst nein.', a => { if (!nein(a)) r.bem = a.trim(); return true });
-  q('vork', () => 'Wichtige Vorkommnisse oder Besprechungen fürs Bautagebuch? Sonst nein.', a => { if (!nein(a)) r.vork = a.trim(); return true });
+  q('bem', () => 'Bemerkungen oder abweichende Arbeitszeiten? Sonst nein.', a => { if (!nurNein(a)) r.bem = a.trim(); return true });
+  q('vork', () => 'Wichtige Vorkommnisse oder Besprechungen fürs Bautagebuch? Sonst nein.', a => { if (!nurNein(a)) r.vork = a.trim(); return true });
   return Q;
 }
 function telStart() {
@@ -883,7 +900,7 @@ async function telBot(text) {
 function telAntwort(text) {
   text = String(text || '').trim(); if (!text || S.view !== 'telefon') return;
   stopHoeren(); TEL.log.push({ bot: false, t: text }); TEL.interim = '';
-  if (/^(beenden|abbrechen|stopp|stop|schluss|ende)\b/i.test(text)) return telEnde(true);
+  if (/^\s*(beenden|abbrechen|stopp|stop|schluss|ende)\s*[.!]?\s*$/i.test(text)) return telEnde(true);
   if (/^(überspringen|weiter|nächste)\b/i.test(text)) { TEL.queue.shift(); saveDraft(); return telNext() }
   if (/^(wiederholen|nochmal|wie bitte)\b/i.test(text)) return telBot(TEL.frage);
   const q = TEL.cur; let res;
@@ -955,7 +972,7 @@ function vLieferscheine() {
   const tag = lsTag(LSV.baunr, LSV.datum), alle = LSL.filter(e => e.baunr === LSV.baunr);
   const tage = [...new Set(alle.map(e => e.datum))].sort().reverse();
   return `<div class="card">
-   <div class="grid2"><div><label style="margin-top:0">Baustellen-Nr.</label><input id="ls_bnr" list="ls_bs" inputmode="numeric" value="${esc(LSV.baunr)}" placeholder="26025"></div>
+   <div class="grid2"><div><label style="margin-top:0">Baustellen-Nr.</label>${bnrFeld(`id="ls_bnr" list="ls_bs"`, LSV.baunr, '26025')}</div>
    <div><label style="margin-top:0">Datum</label><input id="ls_dat" type="date" value="${LSV.datum}"></div></div>
    <datalist id="ls_bs">${bs.map(([n, o]) => `<option value="${esc(n)}">${esc(o)}</option>`).join('')}</datalist></div>
   <div class="card" style="background:#fff4ea;border:1.5px solid #f6c89a"><b>📷 Lieferschein scannen</b><p class="hint" style="margin:4px 0 8px">Jeden Lieferschein bei Ankunft fotografieren – die Werte landen sofort in der Tabelle.</p>
@@ -1058,7 +1075,7 @@ async function syncImport(file) {
   for (const [k, v] of Object.entries(neu)) { if (k[0] === '-') await DB.del(k.slice(1)); else await DB.set(k, v) }
   const n = x => (x || []).length;
   toast(`Eingelesen: ${n(neu.history) - n(L.history)} neue Tagesberichte, ${n(neu.slhistory) - n(L.slhistory)} Stundenlohnberichte, ${n(neu.lsliste) - n(L.lsliste)} Lieferscheine`, 5000);
-  setTimeout(() => location.reload(), 1800);
+  NOFLUSH = true; clearTimeout(saveTimer); setTimeout(neuLadenOhneSichern, 1800);
 }
 
 // ---------------------------------------------------------------- Stundenlohnarbeiten (eigener Bereich, Aufbau wie Formular „Stundenlohnbericht“)
@@ -1097,7 +1114,7 @@ ${r.ausTB ? `<div class="demo">Übernommen aus dem Tagesbericht vom <b>${dateDe(
 <div class="card">
  <label style="margin-top:0">Aufgestellt von (Polier/Bauführer)</label>${pickBtn('von', r.von || 'Polier auswählen …')}
  <div class="grid2"><div><label>Datum</label><input type="date" data-f="datum" value="${r.datum}"></div><div><label>Tag</label><input value="${wtag(r.datum)}" disabled></div></div>
- <label>Baustellen-Nr.</label><input data-f="baunr" list="bslist" inputmode="numeric" value="${esc(r.baunr)}" placeholder="z. B. 26025">
+ <label>Baustellen-Nr.</label>${bnrFeld(`data-f="baunr" list="bslist"`, r.baunr, 'z. B. 26025')}
  <datalist id="bslist">${bs.map(h => `<option value="${esc(h.baunr)}">${esc(h.baustelle)}</option>`).join('')}</datalist>
  <label>Baustelle</label><input data-f="baustelle" value="${esc(r.baustelle)}" placeholder="z. B. Ulm BWK NB Psychiatrie">
  <label>Bauteil / Zusatz (optional)</label><input data-f="bauteil" value="${esc(r.bauteil)}" placeholder="z. B. Rückbau Straßenbeleuchtung">
@@ -1120,6 +1137,7 @@ function vAbschlussSL() {
 }
 function pruefeSL(r) {
   const o = [], D = slDaten(r);
+  if (!r.datum) o.push({ t: 'e', s: 0, m: 'Datum fehlt.' });
   if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (aufgestellt von) fehlt.' });
   if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
   if (!r.baustelle) o.push({ t: 'e', s: 0, m: 'Baustelle fehlt.' });
@@ -1179,6 +1197,8 @@ function slJson(r) {
 function pruefe(r) {
   if (r.typ === 'sl') return pruefeSL(r);
   const o = [], d = dauer(r);
+  if (!r.datum) o.push({ t: 'e', s: 0, m: 'Datum fehlt.' });
+  if (!r.beginn || !r.ende) o.push({ t: 'e', s: 5, m: 'Beginn und Ende der Arbeitszeit angeben.' });
   if (!r.von) o.push({ t: 'e', s: 0, m: 'Polier (ausgestellt von) fehlt.' });
   if (!r.baunr) o.push({ t: 'e', s: 0, m: 'Baustellen-Nr. fehlt.' });
   if (!r.baustelle) o.push({ t: 'e', s: 0, m: 'Baustelle fehlt.' });
@@ -1337,7 +1357,7 @@ function openPicker(kind, cb, selected = []) {
     for (const it of items) {
       const hay = (it.v + ' ' + it.sub).toLowerCase(); if (!q.every(t => hay.includes(t))) continue;
       if (it.g !== lg && it.g) { h += `<div class="grp">${esc(it.g)}</div>`; lg = it.g }
-      let lab = esc(it.v); q.forEach(t => { lab = lab.replace(new RegExp('(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'), '<mark>$1</mark>') });
+      let lab = q.length ? String(it.v).split(new RegExp('(' + q.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'ig')).map((x, i) => i % 2 ? '<mark>' + esc(x) + '</mark>' : esc(x)).join('') : esc(it.v);
       h += zeile(it, lab); n++;
       if (n > 300) break;
     }
@@ -1502,7 +1522,7 @@ async function emlErzeugen(r, files) {
   const st = new Date(), z = n => String(n).padStart(2, '0');
   return new File([m], `Mail ${r.typ === 'sl' ? 'SL' : 'TB'} ${r.baunr || ''} ${dShort(r.datum, '-')} ${z(st.getHours())}${z(st.getMinutes())}.eml`.replace(/[\\/:*?"<>|]/g, ''), { type: 'message/rfc822' });
 }
-document.addEventListener('click', e => { if (e.target.closest('#emllink') && S.prepared) setTimeout(() => abgeschlossen('mail'), 1200) });
+document.addEventListener('click', e => { if (e.target.closest('#emllink') && S.prepared && !S.prepared._emlKlick) { S.prepared._emlKlick = true; setTimeout(() => { if (S.prepared) abgeschlossen('mail') }, 1200) } });
 const istPC = () => !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) && !(/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 async function share() {
   const { r } = S.prepared, alle = S.prepared.files;
@@ -1513,8 +1533,34 @@ async function share() {
   try {
     await navigator.share({ files, title: betreff(r), text: mailText(r) });
     await abgeschlossen('mail');
-  } catch (e) { if (e.name === 'AbortError') return; toast(`Teilen abgelehnt (${e.name}: ${e.message}) – Dateien werden gespeichert`, 7000); download() }
+  } catch (e) { if (e.name === 'AbortError') return; teilenFehler(e, files) }
 }
+// Teilen abgelehnt (Android: „Permission denied“) → neue Versuche brauchen ein neues Antippen, daher Auswahl anzeigen
+function teilenFehler(e, versucht) {
+  const { files } = S.prepared, pdfs = files.filter(f => /\.pdf$/.test(f.name)), nurPdf = versucht.length > pdfs.length && teilbar(pdfs);
+  S.prepared._fehler = `${e.name}: ${e.message}`;
+  overlay(`<b style="font-size:17px">Android hat das Senden abgelehnt</b>
+  <p class="small">${nurPdf ? 'Versuche es mit nur den PDFs – oder speichere die Dateien und hänge sie in der Mail-App selbst an.' : 'Bitte die Dateien speichern und in der Mail-App selbst anhängen.'}</p>
+  ${nurPdf ? '<button class="btn orange full big" data-act="sharepdf">📤 Nur PDFs senden</button>' : ''}
+  <button class="btn ${nurPdf ? 'ghost' : 'orange'} full" style="margin-top:8px" data-act="dateiliste">💾 Dateien einzeln speichern</button>
+  <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>
+  <p class="small" style="opacity:.7;margin-top:10px">Technik-Info fürs Büro: ${esc(e.name)} – ${esc(e.message)} · ${versucht.map(f => esc(f.name) + ' (' + esc(f.type) + ', ' + Math.ceil(f.size / 1024) + ' KB)').join(', ')} · ${esc(navigator.userAgent.match(/(SamsungBrowser|Firefox|EdgA|OPR|Chrome)\/[\d.]+/)?.[0] || '')} · App ${APP_VERSION}</p>`);
+}
+async function sharePdf() {
+  const { r, files } = S.prepared, pdfs = files.filter(f => /\.pdf$/.test(f.name));
+  try { await navigator.share({ files: pdfs, title: betreff(r), text: mailText(r) + '\n\n(Nur PDFs – Excel/DATEN-Datei konnten von diesem Handy nicht mitgeschickt werden.)' }); await abgeschlossen('mail') }
+  catch (e) { if (e.name === 'AbortError') return; teilenFehler(e, pdfs); const b = document.querySelector('[data-act="sharepdf"]'); if (b) b.remove() }
+}
+// Jede Datei als eigener Knopf: Android lässt pro Antippen nur einen Download zu (mehrere automatisch = blockiert)
+function dateiListe(mitMail) {
+  const { r, files } = S.prepared;
+  overlay(`<b style="font-size:17px">Dateien speichern</b>
+  <p class="small">Jede Datei einmal antippen – sie landet im Ordner <b>Downloads</b>.${mitMail ? ' Danach die Mail öffnen und die Dateien anhängen.' : ''}</p>
+  <div style="display:flex;flex-direction:column;gap:6px;margin:8px 0">${files.map((f, i) => `<a class="btn ghost full" style="justify-content:space-between" data-dl="${i}" href="${URL.createObjectURL(f)}" download="${esc(f.name)}"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">⬇ ${esc(f.name)}</span><small>${Math.ceil(f.size / 1024)} KB</small></a>`).join('')}</div>
+  ${mitMail !== false ? `<a class="btn orange full" href="mailto:${encodeURIComponent(SET.email || '')}?subject=${encodeURIComponent(betreff(r))}&body=${encodeURIComponent(mailText(r) + '\n\nDie Dateien sind angehängt.')}" data-act="mailoffen">✉️ E-Mail öffnen</a>` : ''}
+  <button class="btn ghost full" style="margin-top:8px" data-act="${mitMail !== false ? 'dlfertig' : 'ovclose'}">${mitMail !== false ? 'Fertig – Bericht ist versendet' : 'Schließen'}</button>`);
+}
+document.addEventListener('click', e => { const a = e.target.closest('[data-dl]'); if (a) { a.style.opacity = '.55'; a.querySelector('span').textContent = '✓ ' + a.querySelector('span').textContent.replace(/^[⬇✓] /, '') } });
 const dateiLaden = f => { const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove() };
 // Dateien nur ablegen (ohne Versand): Laptop → Ordner wählen, iPhone → „In Dateien sichern“, Android → Download-Ordner
 async function speichern(files = S.prepared.files) {
@@ -1525,12 +1571,14 @@ async function speichern(files = S.prepared.files) {
       toast(`${files.length} Dateien im Ordner „${dir.name}“ gespeichert`, 4000); return;
     }
     if (isIOS() && teilbar(files)) { toast('Im nächsten Fenster „In Dateien sichern“ wählen', 4000); await navigator.share({ files }); return }
+    if (files.length > 1 && S.prepared && files === S.prepared.files && !istPC()) { dateiListe(false); return }
     files.forEach((f, i) => setTimeout(() => { const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove() }, i * 400));
     toast('Dateien werden im Download-Ordner gespeichert', 4000);
   } catch (e) { if (e.name !== 'AbortError') toast('Speichern nicht möglich: ' + e.message) }
 }
 function download() {
   const { r, files } = S.prepared;
+  if (!istPC() && files.length > 1) return dateiListe(true);
   files.forEach((f, i) => setTimeout(() => { const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove() }, i * 400));
   setTimeout(() => { location.href = `mailto:${encodeURIComponent(SET.email)}?subject=${encodeURIComponent(betreff(r))}&body=${encodeURIComponent(mailText(r) + '\n\nBitte die heruntergeladenen Dateien anhängen.')}` }, files.length * 400 + 300);
   abgeschlossen('mail');
@@ -1582,14 +1630,14 @@ document.addEventListener('click', async e => {
   if (ds.lsedit) { LSV.offen = LSV.offen === ds.lsedit ? null : ds.lsedit; render(); return }
   if (ds.lsday) { LSV.datum = ds.lsday; LSV.offen = null; render(); scrollTo(0, 0); return }
   if (ds.lsdel) { if (await bestaetigen('Diesen Lieferschein aus der Liste löschen?')) { LSL = LSL.filter(e => e.id !== ds.lsdel); await lsSpeichern(); render() } return }
-  if (ds.lschip) { const [id, i] = ds.lschip.split('|'); const e = LSL.find(x => x.id === id); const c = e.ocr.chips[+i]; e.mat = c[1]; e.einh = c[2] || e.einh; await lsSpeichern(); render(); return }
+  if (ds.lschip) { const [id, i] = ds.lschip.split('|'); const e = LSL.find(x => x.id === id); const c = e.ocr.chips[+i]; e.mat = c[1]; e.einh = c[2] || e.einh; e.geaendert = Date.now(); await lsSpeichern(); render(); return }
   if (ds.view) { S.view = ds.view; render(); scrollTo(0, 0); return }
   if (ds.step) { S.step = +ds.step; render(); scrollTo(0, 0); return }
   if (ds.go) { e.preventDefault(); S.step = +ds.go; render(); scrollTo(0, 0); return }
   if (ds.doc) { S.doc = ds.doc; render(); return }
   if (ds.pause) { r.pause = ds.pause; saveDraft(); render(); return }
   if (ds.wetter) { r.wetter = r.wetter === ds.wetter ? '' : ds.wetter; saveDraft(); render(); return }
-  if (ds.delap) { r.aps = r.aps.filter(a => a.id !== ds.delap); saveDraft(); render(); return }
+  if (ds.delap) { r.aps = r.aps.filter(a => a.id !== ds.delap); [...r.personal, ...r.geraete].forEach(x => { if (x.h) delete x.h[ds.delap] }); r.material.forEach(m => { if (m.ap === ds.delap) m.ap = r.aps[0].id }); saveDraft(); render(); return }
   if (ds.del) { const [k, id] = ds.del.split('|'); r[k] = r[k].filter(x => x.id !== id); saveDraft(); render(); return }
   if (ds.delfoto) { const [id, i] = ds.delfoto.split('|'); const m = r.material.find(x => x.id === id); m.fotos.splice(+i, 1); saveDraft(); render(); return }
   if (ds.zus) { const [id, z] = ds.zus.split('|'); const p = r.personal.find(x => x.id === id); p.zus = p.zus === z ? '' : z; saveDraft(); render(); return }
@@ -1602,8 +1650,8 @@ document.addEventListener('click', async e => {
   if (ds.beruf) { const [id, b] = ds.beruf.split('|'); const p = r.personal.find(x => x.id === id); p.beruf = p.beruf === b ? '' : b; if (p.beruf) { BERUF[p.name] = b; DB.set('berufe', BERUF) } saveDraft(); render(); return }
   if (ds.pick) {
     const [k, id] = ds.pick.split('|');
-    if (k === 'lslief') { openPicker('lief', l => { const e = LSL.find(x => x.id === id); e.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; lsSpeichern() }); return }
-    if (k === 'lsmat') { openPicker('mat', m => { const e = LSL.find(x => x.id === id); e.mat = m[0]; e.matnr = m[1] || ''; e.einh = m[2] || e.einh; lsSpeichern() }); return }
+    if (k === 'lslief') { openPicker('lief', l => { const e = LSL.find(x => x.id === id); e.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; e.geaendert = Date.now(); lsSpeichern() }); return }
+    if (k === 'lsmat') { openPicker('mat', m => { const e = LSL.find(x => x.id === id); e.mat = m[0]; e.matnr = m[1] || ''; e.einh = m[2] || e.einh; e.geaendert = Date.now(); lsSpeichern() }); return }
     if (k === 'von') openPicker('polier', m => { r.von = m[0] });
     if (k === 'lief') openPicker('lief', l => { const x = r.material.find(x => x.id === id); x.lief = (!SD.lief.includes(l[0]) && liefKurz(l[0])) || l[0]; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('lief')) });
     if (k === 'mat') openPicker('mat', m => { const x = r.material.find(x => x.id === id); x.mat = m[0]; x.matnr = m[1] || ''; x.einh = m[2] || ''; if (x.ocr) x.ocr.auto = x.ocr.auto.filter(f => !f.startsWith('mat')); if (!x.lief && ['MKB', 'BSR'].includes(m[3])) x.lief = m[3] });
@@ -1637,7 +1685,7 @@ document.addEventListener('click', async e => {
   }
   if (a === 'lsimport') lsPicker(r);
   if (a === 'install' && installEvt) { installEvt.prompt(); installEvt = null }
-  if (a === 'neu') { S.r = neuerBericht(); S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0) }
+  if (a === 'neu') { if (S.r && S.r.typ !== 'sl' && S.r._draft !== false && hatInhalt(S.r) && !(await bestaetigen('Der angefangene Bericht wird verworfen. Wirklich einen neuen Bericht beginnen?'))) return; S.r = neuerBericht(); S.step = 0; S.view = 'erfassung'; saveDraft(); render(); scrollTo(0, 0) }
   if (a === 'weiter') { S.view = 'erfassung'; render() }
   if (a === 'verwerfen') { if (await bestaetigen('Entwurf wirklich löschen?')) { S.r = null; await DB.del('draft'); render() } }
   if (a === 'vorlage') vorlageMitPruefung(HIST[0]);
@@ -1656,12 +1704,15 @@ document.addEventListener('click', async e => {
   if (a === 'prepare') {
     const err = pruefe(r).filter(x => x.t === 'e'); if (err.length) { toast(`Noch ${err.length} Fehler – bitte korrigieren`); return }
     if (!SET.email && !SET.uploadUrl) { toast('Bitte zuerst in den Einstellungen die E-Mail des Büros eintragen'); return }
-    const w = pruefe(r).filter(x => x.t === 'w'); if (w.length && !(await bestaetigen(`${w.length} Hinweis(e) offen (z. B. ${w[0].m}). Trotzdem senden?`))) return;
+    const w = pruefe(r).filter(x => x.t === 'w'); if (w.length && !(await bestaetigen(`${w.length} Hinweis(e) offen (z. B. ${w[0].m}). Trotzdem senden?`, true))) return;
     prepare(r);
   }
   if (a === 'share') share();
   if (a === 'speichern') speichern();
   if (a === 'download') download();
+  if (a === 'sharepdf') sharePdf();
+  if (a === 'dateiliste') dateiListe(true);
+  if (a === 'dlfertig') { closeOverlay(); abgeschlossen('mail') }
   if (a === 'ovclose') closeOverlay();
   if (a === 'ovhome') { closeOverlay(); S.view = 'home'; render(); scrollTo(0, 0) }
   if (a === 'sendqueue') sendQueue();
@@ -1672,14 +1723,14 @@ document.addEventListener('click', async e => {
     await DB.set('settings', SET); toast('Gespeichert ✓'); S.view = 'home'; render();
   }
   if (a === 'lernreset') { if (await bestaetigen('Alles Gelernte zu Lieferscheinen löschen?')) { LERN = { alias: {}, lief: {} }; await DB.set('lernen', LERN); render() } }
-  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'draft_sl', 'history', 'slhistory', 'berufe', 'favoriten', 'haeufig', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
+  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'draft_sl', 'history', 'slhistory', 'berufe', 'favoriten', 'haeufig', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); neuLadenOhneSichern() } }
 });
 async function slErsetzen() { const d = S.sl; return !(d && (d.baustelle || d.personal.length || d.aps.some(a => a.text))) || await bestaetigen('Der offene Stundenlohn-Entwurf wird ersetzt. Fortfahren?') }
-function bestaetigen(text) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
+function bestaetigen(text, html) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${html ? text : esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
 
 document.addEventListener('input', e => {
   const t = e.target, ds = t.dataset, r = S.r;
-  if (ds.lsf) { const [id, k] = ds.lsf.split('|'); const x = LSL.find(y => y.id === id); x[k] = k === 'menge' ? t.value.replace(',', '.') : t.value; clearTimeout(window.__lst); window.__lst = setTimeout(lsSpeichern, 400); return }
+  if (ds.lsf) { const [id, k] = ds.lsf.split('|'); const x = LSL.find(y => y.id === id); x[k] = k === 'menge' ? t.value.replace(',', '.') : t.value; x.geaendert = Date.now(); clearTimeout(window.__lst); window.__lst = setTimeout(lsSpeichern, 400); return }
   if (!r) return;
   if (ds.f) {
     r[ds.f] = t.value;
@@ -1712,9 +1763,7 @@ document.addEventListener('change', async e => {
   if (ds.foto && t.files[0]) {
     const m = S.r.material.find(x => x.id === ds.foto), f = t.files[0];
     try {
-      const bmp = await createImageBitmap(f); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-      const c = document.createElement('canvas'); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-      m.fotos.push(c.toDataURL('image/jpeg', 0.72)); saveDraft(); render();
+      m.fotos.push(await fotoKomprimieren(f)); saveDraft(); render();
     } catch (err) { toast('Foto konnte nicht gelesen werden') }
   }
 });

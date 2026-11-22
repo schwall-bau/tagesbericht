@@ -48,14 +48,15 @@ function berichtAus(d) {
 }
 async function verarbeiten(files) {
   const out = document.getElementById('out'); out.hidden = false; out.innerHTML = '<b>Ergebnis</b>';
-  if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
+  try { if (!VORLAGE) { const r = await fetch('vorlage-tagesbericht.xlsx'); if (!r.ok) throw new Error(); VORLAGE = await r.arrayBuffer() } }
+  catch (e) { out.innerHTML += '<div class="it"><span class="err">Excel-Vorlage konnte nicht geladen werden. Bitte die Seite über die App-Adresse (https://…) öffnen, nicht als Datei.</span></div>'; return }
   for (const f of files) {
     const row = document.createElement('div'); row.className = 'it'; row.innerHTML = `<span>${esc(f.name)}</span><span>wird erzeugt …</span>`; out.appendChild(row);
     try {
       const d = JSON.parse(await f.text()); let buf, name;
       if (d.format === 'schwall-stundenlohn') {   // Stundenlohnbericht
         if (!d.bericht_app) throw new Error('DATEN-Datei ohne Berichtsdaten');
-        if (!VORLAGE_SL) VORLAGE_SL = await (await fetch('vorlage-stundenlohn.xlsx')).arrayBuffer();
+        if (!VORLAGE_SL) { const rs = await fetch('vorlage-stundenlohn.xlsx'); if (!rs.ok) throw new Error('Stundenlohn-Vorlage konnte nicht geladen werden'); VORLAGE_SL = await rs.arrayBuffer() }
         const r = d.bericht_app; buf = await slFuellen(JSZip, VORLAGE_SL.slice(0), r);
         name = `${r.baunr || 'ohneNr'}-SL-${String(r.datum).slice(2).replace(/-/g, '')}.xlsx`;
       } else {

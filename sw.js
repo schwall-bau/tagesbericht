@@ -1,10 +1,10 @@
 // Service Worker: macht die App offline nutzbar (Baustelle ohne Netz).
 // Bei jeder neuen Version VERSION erhöhen, damit die Handys das Update laden.
-const VERSION = 'tb-1.15.0';
+const VERSION = 'tb-1.16.0';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest',
-  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js', 'vendor/jszip.min.js', 'excel.js', 'vorlage-tagesbericht.xlsx', 'vorlage-stundenlohn.xlsx', 'buero.html',
-  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/logo-header.png', 'icons/icon-192-v2.png', 'icons/icon-512-v2.png', 'icons/apple-touch-icon-v2.png'
+  'vendor/jspdf.umd.min.js', 'vendor/html2canvas.min.js', 'vendor/xlsx.mini.min.js', 'vendor/tesseract/tesseract.min.js', 'vendor/tesseract/worker.min.js', 'vendor/tesseract/tesseract-core-simd-lstm.wasm.js', 'vendor/tesseract/tesseract-core-lstm.wasm.js', 'vendor/tesseract/deu.traineddata.gz', 'vendor/jszip.min.js', 'excel.js', 'vorlage-tagesbericht.xlsx', 'vorlage-stundenlohn.xlsx', 'buero.html',
+  'icons/logo-dark.png', 'icons/logo-white.png', 'icons/logo-header.png', 'icons/icon-192-v2.png', 'icons/icon-512-v2.png', 'icons/apple-touch-icon-v2.png', 'icons/icon-maskable-512-v2.png'
 ];
 
 self.addEventListener('install', e => {
