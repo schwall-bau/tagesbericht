@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.15.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -45,7 +45,8 @@ let HIST = [];            // gesendete Berichte (ohne Dateien)
 let QUEUE = [];           // Upload-Warteschlange (nur Direktversand)
 const S = { view: 'home', step: 0, r: null, doc: 'tb', prepared: null, sl: null, tb: null };   // r = gerade bearbeiteter Bericht (Tagesbericht oder Stundenlohn); tb/sl = geparkte Entwürfe
 let SLHIST = [];          // gesendete Stundenlohnberichte
-let BERUF = {};           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
+let BERUF = {};
+let FAV = {}, HAEUFIG = {};   // Favoriten und Zähler „häufig gewählt“ je Liste (Mitarbeiter, Geräte, Material, Lieferant)           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
 let saveTimer = null;
 const draftKey = r => r && r.typ === 'sl' ? 'draft_sl' : 'draft';
 function saveDraft() { clearTimeout(saveTimer); if (S.r) S.r._t = Date.now(); saveTimer = setTimeout(() => { if (S.r) DB.set(draftKey(S.r), S.r) }, 400) }
@@ -92,7 +93,7 @@ async function init() {
   try {
     SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
     LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
-    SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
+    FAV = await DB.get('favoriten') || {}; HAEUFIG = await DB.get('haeufig') || {}; SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
     HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
   } catch (e) { console.error(e) }
@@ -1011,8 +1012,9 @@ function lsPicker(r) {
   });
 }
 
+const behalten = list => list.filter((h, i) => i < 30 || Date.now() - (h.gesendet || 0) < 90 * 864e5).slice(0, 300);   // letzte 90 Tage (mind. 30 Berichte)
 // ---------------------------------------------------------------- Daten übertragen (PC ⇄ Handy) per Sync-Datei
-const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'lsliste', 'lernen', 'berufe', 'stammdaten', 'settings'];
+const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'lsliste', 'lernen', 'berufe', 'favoriten', 'haeufig', 'stammdaten', 'settings'];
 function syncDialog() {
   overlay(`<b style="font-size:18px">🔄 Daten übertragen</b>
   <p class="small" style="text-align:left">Damit PC und Handy denselben Stand haben:<br>1. Auf dem Gerät mit den neuesten Daten <b>Sync-Datei speichern</b> (z. B. in OneDrive oder per Mail an dich selbst).<br>2. Auf dem anderen Gerät <b>Sync-Datei einlesen</b>.<br>Es wird zusammengeführt, nichts gelöscht: gesendete Berichte, Lieferschein-Liste und Gelerntes von beiden Geräten bleiben erhalten; bei Entwürfen gilt der neuere.</p>
@@ -1035,13 +1037,15 @@ async function syncImport(file) {
   const I = d.daten || {}, L = {}; for (const k of SYNC_KEYS) L[k] = await DB.get(k);
   if (SET.polier && d.polier && d.polier !== SET.polier && !(await bestaetigen(`Die Datei stammt von „${esc(d.polier)}“, hier ist „${esc(SET.polier)}“ eingerichtet. Trotzdem einlesen?`))) return;
   const neu = {};
-  neu.history = nachId(L.history, I.history, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)).slice(0, 60);
-  neu.slhistory = nachId(L.slhistory, I.slhistory, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)).slice(0, 30);
+  neu.history = nachId(L.history, I.history, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.history = behalten(neu.history);
+  neu.slhistory = nachId(L.slhistory, I.slhistory, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.slhistory = behalten(neu.slhistory);
   neu.lsliste = nachId(L.lsliste, I.lsliste, e => (e.uebernommen ? 1e13 : 0) + (e.geaendert || e.zeit || 0));
   const li = I.lernen || { alias: {}, lief: {} }, ll = L.lernen || { alias: {}, lief: {} }, lief = Object.assign({}, li.lief);
   Object.entries(ll.lief || {}).forEach(([k, v]) => { if (!lief[k] || (v.n || 0) >= (lief[k].n || 0)) lief[k] = v });
   neu.lernen = { alias: Object.assign({}, li.alias, ll.alias), lief };
   neu.berufe = Object.assign({}, I.berufe, L.berufe);
+  neu.favoriten = {}; for (const k of new Set([...Object.keys(I.favoriten || {}), ...Object.keys(L.favoriten || {})])) neu.favoriten[k] = [...new Set([...((L.favoriten || {})[k] || []), ...((I.favoriten || {})[k] || [])])];
+  neu.haeufig = {}; for (const k of new Set([...Object.keys(I.haeufig || {}), ...Object.keys(L.haeufig || {})])) { const a = (I.haeufig || {})[k] || {}, b = (L.haeufig || {})[k] || {}; neu.haeufig[k] = {}; for (const v of new Set([...Object.keys(a), ...Object.keys(b)])) neu.haeufig[k][v] = Math.max(a[v] || 0, b[v] || 0) }
   if (I.stammdaten && (!L.stammdaten || String(I.stammdaten.stand || '') > String(L.stammdaten.stand || ''))) neu.stammdaten = I.stammdaten;
   if (!L.settings && I.settings) neu.settings = I.settings;   // Einstellungen nur übernehmen, wenn dieses Gerät noch nicht eingerichtet ist
   // Entwürfe: bereits gesendete fallen weg, sonst gilt der zuletzt geänderte
@@ -1314,17 +1318,27 @@ function openPicker(kind, cb, selected = []) {
   if (kind === 'ge') { title = 'Geräte'; multi = true; items = SD.ge.map(g => ({ v: g[0], sub: g[2] ? 'KST ' + g[2] : '', g: g[3], raw: g })) }
   if (kind === 'mat') { title = 'Material'; items = SD.mat.map(m => ({ v: m[0], sub: (m[2] ? m[2] + ' · ' : '') + m[1], g: m[3], raw: m })) }
   if (kind === 'lief') { title = 'Lieferant'; items = SD.lief.map(l => ({ v: l, sub: '', g: '', raw: [l] })) }
+  const fk = kind === 'polier' ? 'ma' : kind; FAV[fk] = FAV[fk] || []; HAEUFIG[fk] = HAEUFIG[fk] || {};
+  FAV[fk].filter(v => !items.some(x => x.v === v)).forEach(v => items.push({ v, sub: 'eigener Eintrag', g: '', raw: [v, '', '', ''] }));   // frei eingetragene Favoriten
   const sel = new Set(selected), el = document.createElement('div'); el.className = 'sheet';
   el.innerHTML = `<div class="in"><div class="top"><div class="prow"><b style="font-size:18px">${title} ${multi ? '<span class="hint">(mehrere möglich)</span>' : ''}</b><button class="btn small" data-close>${multi ? 'Fertig' : '✕'}</button></div><input type="search" placeholder="${kind === 'ma' ? 'Suchen … oder neuen Namen eintippen (Nachname, Vorname)' : 'Suchen … Name, Teil davon oder Nummer'}" autocomplete="off"></div><div class="list"></div></div>`;
   document.body.appendChild(el);
   const inp = el.querySelector('input'), list = el.querySelector('.list');
   const draw = () => {
     const q = inp.value.trim().toLowerCase().split(/\s+/).filter(Boolean); let h = '', lg = null, n = 0;
+    const zeile = (it, lab) => `<div class="it ${sel.has(it.v) ? 'sel' : ''}" data-v="${esc(it.v)}"><button class="star ${FAV[fk].includes(it.v) ? 'on' : ''}" data-star="${esc(it.v)}" aria-label="Favorit">${FAV[fk].includes(it.v) ? '★' : '☆'}</button><span style="flex:1">${lab}</span><small>${esc(it.sub)}</small></div>`;
+    if (!q.length) {   // oben: Favoriten, dann häufig gewählte
+      const fav = items.filter(it => FAV[fk].includes(it.v)).sort((a, b) => a.v.localeCompare(b.v, 'de'));
+      const oft = items.filter(it => !FAV[fk].includes(it.v) && (HAEUFIG[fk][it.v] || 0) >= 2).sort((a, b) => HAEUFIG[fk][b.v] - HAEUFIG[fk][a.v]).slice(0, 8);
+      if (fav.length) h += `<div class="grp">★ Favoriten</div>` + fav.map(it => zeile(it, esc(it.v))).join('');
+      if (oft.length) h += `<div class="grp">Häufig gewählt</div>` + oft.map(it => zeile(it, esc(it.v))).join('');
+      if (!fav.length && !oft.length && items.length > 8) h += `<div class="hint" style="padding:8px 14px">Tipp: ☆ antippen = Favorit, steht dann immer oben.</div>`;
+    }
     for (const it of items) {
       const hay = (it.v + ' ' + it.sub).toLowerCase(); if (!q.every(t => hay.includes(t))) continue;
       if (it.g !== lg && it.g) { h += `<div class="grp">${esc(it.g)}</div>`; lg = it.g }
       let lab = esc(it.v); q.forEach(t => { lab = lab.replace(new RegExp('(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'), '<mark>$1</mark>') });
-      h += `<div class="it ${sel.has(it.v) ? 'sel' : ''}" data-v="${esc(it.v)}"><span>${lab}</span><small>${esc(it.sub)}</small></div>`; n++;
+      h += zeile(it, lab); n++;
       if (n > 300) break;
     }
     if (inp.value.trim()) h += `<div class="it" data-free="1"><span>＋ „${esc(inp.value.trim())}“ ${kind === 'ma' || kind === 'polier' ? 'als neuen Mitarbeiter eintragen' : 'als eigenen Eintrag übernehmen'}</span></div>`;
@@ -1335,9 +1349,12 @@ function openPicker(kind, cb, selected = []) {
   const close = () => { el.remove(); saveDraft(); render() };
   el.addEventListener('click', e => {
     if (e.target === el || e.target.closest('[data-close]')) { close(); return }
+    const st = e.target.closest('[data-star]');
+    if (st) { const v = st.dataset.star, i = FAV[fk].indexOf(v); if (i < 0) FAV[fk].push(v); else FAV[fk].splice(i, 1); DB.set('favoriten', FAV); draw(); return }
     const it = e.target.closest('.it'); if (!it) return;
     if (it.dataset.free) { cb([inp.value.trim(), '', '', ''], true); if (multi) { inp.value = ''; draw() } else close(); return }
     const obj = items.find(x => x.v === it.dataset.v);
+    if (!sel.has(obj.v)) { HAEUFIG[fk][obj.v] = (HAEUFIG[fk][obj.v] || 0) + 1; DB.set('haeufig', HAEUFIG) }
     if (multi) { if (sel.has(obj.v)) { sel.delete(obj.v); cb(obj.raw, false) } else { sel.add(obj.v); cb(obj.raw, true) } draw() } else { cb(obj.raw, true); close() }
   });
 }
@@ -1428,7 +1445,13 @@ async function dateienErzeugen(r) {
 const teilbar = files => !!(navigator.canShare && navigator.canShare({ files }));
 // manche Android-Handys dürfen Excel-Dateien nicht über „Teilen“ weitergeben → dann ohne Excel teilen (Büro erzeugt sie aus der DATEN-Datei)
 // Chrome/Android meldet „teilbar“, lehnt Excel beim eigentlichen Teilen aber ab („Permission denied“) → dort Excel gleich weglassen; nur iPhone/iPad gibt Excel weiter
-function teilDateien(files) { if (!isIOS()) { const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: ohne.length < files.length } : { files: null, ohneExcel: false } } if (teilbar(files)) return { files, ohneExcel: false }; const ohne = files.filter(f => !/\.xlsx$/.test(f.name)); return teilbar(ohne) ? { files: ohne, ohneExcel: true } : { files: null, ohneExcel: false } }
+function teilDateien(files) {
+  // iPhone: alles. Android/Chrome: ohne Excel (wird vom System abgelehnt); notfalls nur die PDFs – Hauptsache, die Mail geht direkt auf
+  const stufen = isIOS() ? [files, files.filter(f => !/\.xlsx$/.test(f.name))] : [files.filter(f => !/\.xlsx$/.test(f.name)), files.filter(f => /\.pdf$/.test(f.name))];
+  for (const st of stufen) if (st.length && teilbar(st)) return { files: st, ohneExcel: st.length < files.length };
+  return { files: null, ohneExcel: false };
+}
+function teilGrund() { return !navigator.share ? 'Dieser Browser hat keine Teilen-Funktion.' : !navigator.canShare ? 'Dieser Browser kann keine Dateien teilen.' : 'Der Browser lehnt die Dateien ab.' }
 const betreff = r => r.typ === 'sl' ? `Stundenlohnbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}` : `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
 const mailText = r => r.typ === 'sl' ? `${betreff(r)}\n\nStundenlohnbericht (PDF mit Lieferscheinen als Anlage, Excel)\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nAuftrag durch: ${r.auftrag || '–'}\nPolier: ${r.von}\nPersonal: ${r.personal.length} (${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h) · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n${r.sigAG ? 'Vom Auftraggeber unterschrieben' + (r.agName ? ' (' + r.agName + ')' : '') : 'Noch nicht vom Auftraggeber unterschrieben'}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)` : `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
 
@@ -1461,10 +1484,10 @@ function zeigeVersand(hinweis = '') {
   <div class="files">${files.map(f => `<div>📄 ${esc(f.name)} <span class="small">(${Math.ceil(f.size / 1024)} KB)</span></div>`).join('')}</div>
   <div class="ocrbox" style="text-align:left"><b>Betreff:</b> ${esc(betreff(r))}</div>
   ${kann ? `<p class="small">Tippe auf <b>Senden</b>, wähle <b>Outlook</b> oder <b>Mail</b> und schicke die Nachricht an:<br><b>${esc(SET.email || 'Büro-Adresse')}</b><br>Der Betreff wird mitgegeben. Falls das Betreff-Feld leer bleibt: lange hineintippen → <b>Einsetzen</b> (er ist schon kopiert).</p>
-    ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Android gibt Excel-Dateien beim Teilen nicht weiter – angehängt werden beide PDFs und die DATEN-Datei. Das Büro erzeugt die Excel daraus (buero.html).</p>' : ''}
+    ${td.ohneExcel ? '<p class="small" style="color:var(--gelb)">Android gibt Excel-Dateien beim Teilen nicht weiter – angehängt werden ' + td.files.map(f => esc(f.name)).join(', ') + '. Das Büro erzeugt die Excel aus der DATEN-Datei (buero.html).</p>' : ''}
     <button class="btn orange full big" data-act="share">📤 Senden</button>
     <button class="btn ghost small full" style="margin-top:8px" data-act="speichern">💾 Auf diesem Gerät speichern</button>`
-    : `<p class="small">Dieses Gerät kann Dateien nicht direkt teilen. Die Dateien werden heruntergeladen – bitte an <b>${esc(SET.email)}</b> anhängen.</p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
+    : `<p class="small"><b>${teilGrund()}</b> Bitte die App in <b>Google Chrome</b> (Android) bzw. <b>Safari</b> (iPhone) öffnen und von dort installieren – dann geht Senden direkt in die Mail. Bis dahin: Dateien werden gespeichert, bitte an <b>${esc(SET.email)}</b> anhängen. <span style="opacity:.7">(${esc(navigator.userAgent.match(/(SamsungBrowser|Firefox|EdgA|OPR|Chrome|Version)\/[\d.]+/)?.[0] || '')}, App ${APP_VERSION})</span></p><button class="btn orange full big" data-act="download">⬇ Dateien speichern & E-Mail öffnen</button>`}
   <button class="btn ghost full" style="margin-top:8px" data-act="ovclose">Abbrechen</button>`);
 }
 // Laptop/PC erkennen
@@ -1490,7 +1513,7 @@ async function share() {
   try {
     await navigator.share({ files, title: betreff(r), text: mailText(r) });
     await abgeschlossen('mail');
-  } catch (e) { if (e.name === 'AbortError') return; toast('Teilen nicht möglich – Dateien werden gespeichert und das Mail-Programm geöffnet', 4000); download() }
+  } catch (e) { if (e.name === 'AbortError') return; toast(`Teilen abgelehnt (${e.name}: ${e.message}) – Dateien werden gespeichert`, 7000); download() }
 }
 const dateiLaden = f => { const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; document.body.appendChild(a); a.click(); a.remove() };
 // Dateien nur ablegen (ohne Versand): Laptop → Ordner wählen, iPhone → „In Dateien sichern“, Android → Download-Ordner
@@ -1537,7 +1560,7 @@ const kurz = r => ({ id: r.id, datum: r.datum, baunr: r.baunr, baustelle: r.baus
 async function abgeschlossen(weg, wartet) {
   const r = S.prepared.r; try { lernen(r) } catch (e) { }
   if (r.typ === 'sl') {
-    SLHIST = SLHIST.filter(h => h.id !== r.id); SLHIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); SLHIST = SLHIST.slice(0, 30); SLHIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
+    SLHIST = SLHIST.filter(h => h.id !== r.id); SLHIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); SLHIST = behalten(SLHIST); SLHIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
     await DB.set('slhistory', SLHIST);
     if (S.sl && S.sl.id === r.id) { await DB.del('draft_sl'); S.sl = null; if (S.r && S.r.typ === 'sl') { S.r = S.tb || null; S.tb = null } }
     S.prepared = null;
@@ -1547,7 +1570,7 @@ async function abgeschlossen(weg, wartet) {
   }
   const lsIds = new Set(r.material.map(m => m.lsid).filter(Boolean)); if (lsIds.size) { LSL.forEach(e => { if (lsIds.has(e.id)) e.uebernommen = { datum: r.datum, baunr: r.baunr, id: r.id } }); await lsSpeichern() }
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
-  HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = HIST.slice(0, 30); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
+  HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = behalten(HIST); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
   await DB.set('history', HIST); if (!S.r || S.r.id === r.id) { await DB.del('draft'); S.r = null } S.prepared = null;
   overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
   <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
@@ -1649,7 +1672,7 @@ document.addEventListener('click', async e => {
     await DB.set('settings', SET); toast('Gespeichert ✓'); S.view = 'home'; render();
   }
   if (a === 'lernreset') { if (await bestaetigen('Alles Gelernte zu Lieferscheinen löschen?')) { LERN = { alias: {}, lief: {} }; await DB.set('lernen', LERN); render() } }
-  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'draft_sl', 'history', 'slhistory', 'berufe', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
+  if (a === 'reset') { if (await bestaetigen('Wirklich alle Daten auf diesem Handy löschen (Entwurf, Verlauf, Stammdaten, Einstellungen)?')) { for (const k of ['draft', 'draft_sl', 'history', 'slhistory', 'berufe', 'favoriten', 'haeufig', 'queue', 'stammdaten', 'settings', 'lernen', 'lsliste']) await DB.del(k); location.reload() } }
 });
 async function slErsetzen() { const d = S.sl; return !(d && (d.baustelle || d.personal.length || d.aps.some(a => a.text))) || await bestaetigen('Der offene Stundenlohn-Entwurf wird ersetzt. Fortfahren?') }
 function bestaetigen(text) { return new Promise(res => { const o = overlay(`<p style="font-size:16px">${esc(text)}</p><div class="row"><button class="btn ghost" id="cn">Nein</button><button class="btn orange" id="cy">Ja</button></div>`); o.querySelector('#cn').onclick = () => { closeOverlay(); res(false) }; o.querySelector('#cy').onclick = () => { closeOverlay(); res(true) } }) }
