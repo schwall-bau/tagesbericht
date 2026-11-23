@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.16.1';
+const APP_VERSION = '1.17.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -45,6 +45,8 @@ let HIST = [];            // gesendete Berichte (ohne Dateien)
 let QUEUE = [];           // Upload-Warteschlange (nur Direktversand)
 const S = { view: 'home', step: 0, r: null, doc: 'tb', prepared: null, sl: null, tb: null };   // r = gerade bearbeiteter Bericht (Tagesbericht oder Stundenlohn); tb/sl = geparkte Entwürfe
 let SLHIST = [];          // gesendete Stundenlohnberichte
+let SB = [];              // Stundenbuch: Stunden je Mitarbeiter aus gesendeten Tagesberichten (ca. 13 Monate)
+const SV = { modus: 'tag', datum: '' };   // Ansicht der Stundenübersicht
 let BERUF = {};
 let FAV = {}, HAEUFIG = {};   // Favoriten und Zähler „häufig gewählt“ je Liste (Mitarbeiter, Geräte, Material, Lieferant)           // zuletzt gewählter Beruf je Mitarbeiter (Stundenlohn)
 let saveTimer = null, NOFLUSH = false, LADEFEHLER = false;
@@ -97,7 +99,7 @@ async function init() {
     SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
     LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
     FAV = await DB.get('favoriten') || {}; HAEUFIG = await DB.get('haeufig') || {}; SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
-    HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
+    HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; SB = await DB.get('stundenbuch') || sbAusVerlauf(); LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
   } catch (e) { console.error(e); LADEFEHLER = true; setTimeout(() => toast('⚠️ Gespeicherte Daten konnten nicht gelesen werden. Bitte App schließen und neu öffnen, bevor du sendest.', 8000), 500) }
   S.view = SD ? 'home' : 'setup';
@@ -141,9 +143,9 @@ function render() {
     $('#foot').style.display = 'flex';
     $('#foot').innerHTML = (S.step > 0 ? `<button class="btn ghost" data-act="prev">‹ Zurück</button>` : '') + (S.step < 5 ? `<button class="btn orange" data-act="next">Weiter ›</button>` : `<button class="btn orange" data-act="prepare">PDF erstellen & senden</button>`);
   } else {
-    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte', lieferscheine: '🧾 Lieferschein-Liste', sl: '⏱️ Stundenlohnarbeiten' }[S.view] || 'Tagesbericht';
+    $('#htitle').textContent = { home: 'Tagesbericht', setup: 'Einrichtung', settings: 'Einstellungen', verlauf: 'Gesendete Berichte', lieferscheine: '🧾 Lieferschein-Liste', sl: '⏱️ Stundenlohnarbeiten', stunden: '📅 Stundenübersicht' }[S.view] || 'Tagesbericht';
     if (S.view !== 'home' && S.view !== 'setup') { hb.style.display = ''; hb.textContent = '‹ Start'; hb.onclick = () => { S.view = 'home'; render() } }
-    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf, lieferscheine: vLieferscheine, sl: vSLStart })[S.view]();
+    $('#main').innerHTML = ({ home: vHome, setup: vSetup, settings: vSettings, verlauf: vVerlauf, lieferscheine: vLieferscheine, sl: vSLStart, stunden: vStunden })[S.view]();
   }
   fitA4(); initSig();
 }
@@ -163,6 +165,7 @@ function vHome() {
     ${HIST.length > 1 ? `<button class="btn ghost full" style="margin-top:8px;border-style:dashed" data-act="vorlagewahl">📚 Älteren Bericht als Vorlage wählen …</button>` : ''}
     ${(() => { const h = LSL.filter(e => e.datum === today()), sl = S.sl && (S.sl.baustelle || S.sl.personal.length); return `<div class="grid2" style="margin-top:8px"><button class="btn ghost" style="flex-direction:column" data-act="lsliste">🧾 Lieferscheine<small style="font-weight:400">${h.length ? 'heute ' + h.length + ' LS · ' + matSummen(h) : 'Liste, Tonnage'}</small></button><button class="btn ghost" style="flex-direction:column" data-act="slstart">⏱️ Stundenlohn<small style="font-weight:400">${sl ? 'Entwurf ' + esc(S.sl.baunr || '') + ' offen' : 'Berichte, Regie'}</small></button></div>` })()}
   </div>
+  <button class="btn ghost full" style="margin-bottom:10px;flex-direction:column" data-act="stunden">📅 Stundenübersicht<small style="font-weight:400">${(() => { const w = kwVon(today()), l = sbTage(w.tage); return `KW ${w.kw}: ${fq(l.reduce((a, e) => a + e.pers.reduce((x, p) => x + p.h, 0), 0))} h Personal aus ${l.length} Bericht(en)` })()}</small></button>
   <div class="card"><div class="prow"><b>Gesendete Berichte</b><button class="btn small ghost" data-view="verlauf">Alle</button></div>
    <div class="lst">${HIST.slice(0, 5).map(histItem).join('') || '<div class="hint">Noch keine.</div>'}</div></div>
   <div class="card"><div class="prow"><div><b>Einstellungen</b><div class="small">Empfänger: ${esc(SET.email) || '<span style="color:var(--rot)">nicht festgelegt</span>'}<br>Stammdaten: ${SD ? SD.ma.length + ' Mitarbeiter, ' + SD.ge.length + ' Geräte · Stand ' + dateDe(SD.stand) : '–'}</div></div><button class="btn small ghost" data-view="settings">Ändern</button></div>
@@ -230,7 +233,7 @@ ${r.aps.length < 7 ? `<button class="btn ghost full" data-act="addap">＋ ${sl ?
 const apLbl = (a, i) => `<span class="ap-tag">AP ${esc(a.nr) || '?'}</span><span>${esc(a.text || 'ohne Beschreibung')}</span>`;
 const stepper = (kind, id, ap, val) => `<div class="step"><button data-st="${kind}|${id}|${ap}|-0.25">−</button><input inputmode="decimal" data-hin="${kind}|${id}|${ap}" value="${val ? fmt(val) : ''}" placeholder="0"><button data-st="${kind}|${id}|${ap}|0.25">＋</button></div>`;
 function vPers() {
-  const r = S.r, d = dauer(r), sl = r.typ === 'sl'; return `<h2>Personal</h2>
+  const r = S.r, d = dauer(r), sl = r.typ === 'sl'; if (sl) r.personal.forEach(p => { if (!p.beruf) p.beruf = berufVon(p.name) }); return `<h2>Personal</h2>
 <div class="grid2" style="margin-bottom:6px"><button class="btn" data-act="addma">＋ Mitarbeiter</button><button class="btn ghost" data-act="kolonne">↺ Kolonne + Stunden vom letzten Bericht</button></div>
 ${HIST.length > 1 ? `<button class="btn ghost small full" style="margin-bottom:10px;border-style:dashed" data-act="kolonnewahl">Kolonne aus älterem Bericht …</button>` : ''}
 ${r.personal.length ? `<div class="card" style="background:#f6f6f6"><div class="prow"><div class="hint" style="margin:0">${sl ? `Stundenlohn gesamt: <b>${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h</b>` : `Arbeitszeit lt. Abschluss: <b>${fq(d)} h</b>`}</div><button class="btn small ghost" data-act="copyh">Stunden der 1. Person für alle</button></div></div>` : `<div class="empty">Noch niemand eingetragen.</div>`}
@@ -271,14 +274,17 @@ function vAbschluss() {
 <label>Pause</label><div class="chips">${PAUSEN.map(p => `<button class="chip ${r.pause === p ? 'on' : ''}" data-pause="${p}">${p}</button>`).join('')}</div>
 <div class="hint" style="margin-top:8px">Dauer: <b>${fq(dauer(r))} h</b></div></div>
 <div class="card"><label style="margin-top:0">Bemerkungen / abweichende Arbeitszeit</label><textarea data-f="bem" placeholder="z. B. Mustermann bis 16:00 Uhr">${esc(r.bem)}</textarea>
+<label>Bautagebuch: Art der geleisteten Arbeiten</label><textarea data-f="btbArb" placeholder="${esc(r.aps.filter(a => a.text).map(a => a.text).join('\n') || 'wie Arbeitspakete')}">${esc(r.btbArb || '')}</textarea>
+<div class="hint">Leer lassen = automatisch wie die Arbeitspakete im Tagesbericht (ohne „AP“). </div><button type="button" class="btn small ghost" style="margin-top:4px" data-act="${r.btbArb ? 'btbauto' : 'btbedit'}">${r.btbArb ? '↺ Wieder automatisch (wie Arbeitspakete)' : '✎ Text zum Ändern übernehmen'}</button>
 <label>Wichtige Vorkommnisse, Besprechungen (Bautagebuch)</label><textarea data-f="vork" placeholder="z. B. Baubesprechung mit Mustermann">${esc(r.vork)}</textarea>
 <div class="mic">🎤 Mikrofon auf der Tastatur antippen: diktieren statt tippen.</div></div>
 <h3>Prüfung ${e ? `<span class="badge" style="background:#fdecea;color:var(--rot)">${e} Fehler</span>` : ''} ${w ? `<span class="badge b-pr">${w} Hinweise</span>` : ''}</h3>
 <div class="card">${res.length ? res.map(x => `<div class="check"><span class="dot ${x.t}">${x.t === 'e' ? '!' : '?'}</span><div>${x.m} <a href="#" data-go="${x.s}">ändern</a></div></div>`).join('') : `<div class="check"><span class="dot ok">✓</span><div>Alles vollständig.</div></div>`}</div>
+${tagVorVersand(r)}
 <h3>Unterschrift Polier</h3><div class="card"><canvas class="sigpad" id="sig"></canvas><div class="prow" style="margin-top:6px"><span class="hint" style="margin:0">Mit dem Finger unterschreiben</span><button class="btn small ghost" data-act="sigclear">Löschen</button></div></div>
 <h3>Vorschau</h3>${docViewer(r)}`;
 }
-function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
+function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box" id="xvorschau"><div class="hint" style="padding:30px;background:#fff;text-align:center">Vorschau wird erstellt …</div></div></div>${(vorschauLaden(r), '')}` }
 // Baustellen-Nr.: Zahlen-Tastatur zuerst; „ABC“ schaltet auf Buchstaben um (z. B. 26025A)
 const bnrFeld = (attr, v, ph) => `<div class="bnrfeld"><input ${attr} inputmode="${S.bnrABC ? 'text' : 'numeric'}" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" value="${esc(v)}" placeholder="${ph}"><button type="button" class="btn small ghost" data-kbd="1" title="Tastatur umschalten">${S.bnrABC ? '123' : 'ABC'}</button></div>`;
 document.addEventListener('pointerdown', e => { const b = e.target.closest('[data-kbd]'); if (!b) return; e.preventDefault(); const i = b.previousElementSibling; S.bnrABC = !S.bnrABC; i.inputMode = S.bnrABC ? 'text' : 'numeric'; b.textContent = S.bnrABC ? '123' : 'ABC'; i.blur(); setTimeout(() => i.focus(), 30) });
@@ -1042,7 +1048,7 @@ function lsPicker(r) {
 
 const behalten = list => list.filter((h, i) => i < 30 || Date.now() - (h.gesendet || 0) < 90 * 864e5).slice(0, 300);   // letzte 90 Tage (mind. 30 Berichte)
 // ---------------------------------------------------------------- Daten übertragen (PC ⇄ Handy) per Sync-Datei
-const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'lsliste', 'lernen', 'berufe', 'favoriten', 'haeufig', 'stammdaten', 'settings'];
+const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'stundenbuch', 'lsliste', 'lernen', 'berufe', 'favoriten', 'haeufig', 'stammdaten', 'settings'];
 function syncDialog() {
   overlay(`<b style="font-size:18px">🔄 Daten übertragen</b>
   <p class="small" style="text-align:left">Damit PC und Handy denselben Stand haben:<br>1. Auf dem Gerät mit den neuesten Daten <b>Sync-Datei speichern</b> (z. B. in OneDrive oder per Mail an dich selbst).<br>2. Auf dem anderen Gerät <b>Sync-Datei einlesen</b>.<br>Es wird zusammengeführt, nichts gelöscht: gesendete Berichte, Lieferschein-Liste und Gelerntes von beiden Geräten bleiben erhalten; bei Entwürfen gilt der neuere.</p>
@@ -1067,6 +1073,7 @@ async function syncImport(file) {
   const neu = {};
   neu.history = nachId(L.history, I.history, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.history = behalten(neu.history);
   neu.slhistory = nachId(L.slhistory, I.slhistory, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.slhistory = behalten(neu.slhistory);
+  neu.stundenbuch = nachId(L.stundenbuch, I.stundenbuch, e => e.geaendert || e.gesendet || 0).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0));
   neu.lsliste = nachId(L.lsliste, I.lsliste, e => (e.uebernommen ? 1e13 : 0) + (e.geaendert || e.zeit || 0));
   const li = I.lernen || { alias: {}, lief: {} }, ll = L.lernen || { alias: {}, lief: {} }, lief = Object.assign({}, li.lief);
   Object.entries(ll.lief || {}).forEach(([k, v]) => { if (!lief[k] || (v.n || 0) >= (lief[k].n || 0)) lief[k] = v });
@@ -1091,7 +1098,10 @@ async function syncImport(file) {
 
 // ---------------------------------------------------------------- Stundenlohnarbeiten (eigener Bereich, Aufbau wie Formular „Stundenlohnbericht“)
 const BERUFE = ['Polier', 'FA', 'MA', 'Azubi', 'Helfer', 'BL'];
-const berufVon = name => BERUF[name] || (name === SET.polier ? 'Polier' : 'MA');
+// Vorgabe aus dem Büro (Stand 23.11.2026): FA = Facharbeiter, MA = Maschinist, Polier. Auszubildende laut Liste als FA.
+// Wird ein Beruf im Stundenlohnbericht von Hand geändert, merkt sich das Handy die Änderung (BERUF) – sie hat Vorrang.
+const BERUF_VORGABE = {"Alijaj, Avni": "FA", "Angele, Thomas": "FA", "Asanaj, Avdi": "MA", "Bader, Thomas": "MA", "Baur, Markus Volker": "MA", "Baur, Marcel": "FA", "Berisha, Arsim": "FA", "Bless, Michael": "MA", "Bischof, Harald": "FA", "Benk, Kevin": "MA", "Breymaier, Marc": "MA", "Benk, Dennis": "MA", "Braunsberg, Steffen": "MA", "Brus, Philipp": "FA", "Bösch, Paul": "MA", "Bühler, Hermann": "MA", "Bammert, Lukas": "FA", "Bajra, Vlaznim": "FA", "Bajraj, Ilir": "FA", "Brownlee, Aden": "FA", "Capuk, Riza": "FA", "Dieckmann, Mario": "Polier", "Dittrich, Joel": "FA", "Ertle, Thomas": "FA", "Eggert, Gerd Johannes": "Polier", "Fischer, Tobias": "MA", "Füller, Lucas": "MA", "Füller, Nina": "MA", "Gashi, Mustaf": "FA", "Gohl, Alexander": "Polier", "Gewinner, Carinjou": "MA", "Gerster, Jan": "FA", "Hagel, Nicolai Julian": "MA", "Hartmann, Manfred Josef": "MA", "Hartmann, Thomas Karl": "MA", "Herfort, Armin Roland": "Polier", "Hartmann, Marius": "Polier", "Häussler, Karl": "FA", "Hölzle, Kai": "Polier", "Hartmann, Stefanie": "MA", "Irg, Patrick": "MA", "Jentzsch, Matthias": "Polier", "Jöckel, Thomas": "MA", "Jung, Lothar": "MA", "Karremann, Frank": "MA", "Kohl, Peter": "FA", "Kaufmann, Dennis": "MA", "Kötzer, Josef": "FA", "Koopmann, Robin": "FA", "Knott, Maximilian": "MA", "Kelmendi, Ardi": "FA", "Knerych, Patryk": "FA", "Kuchareschin, Nicolai": "FA", "Köhler, Toni": "MA", "Link, Josef": "MA", "Locher, Patric": "Polier", "Leipolt, Oliver": "Polier", "Mühle, Markus Antonius": "FA", "Müller, Stefan": "Polier", "Münchow, Thomas Hermann": "Polier", "Motz, Sascha": "FA", "Morina, Arben": "FA", "Maucher, Jonas Silvio": "Polier", "Morina, Rrahman": "FA", "Michel, Eugen": "MA", "Morina, Liridon": "FA", "Morina, Lavdrim": "FA", "Neuer, Klaus": "MA", "Rot, Sergej": "MA", "Radovac, Mirko": "FA", "Rupf, Fabian Franz": "FA", "Renner, Gerd": "FA", "Ruepp, Max": "MA", "Schöllhorn, Manfred": "MA", "Silva Santos Da, Antonio Jose": "Polier", "Schlipf, Markus": "FA", "Spatafora, Orazio": "FA", "Schlau, Armin": "MA", "Schuhbaur, Jonathan": "FA", "Schick, Norbert": "Polier", "Schempp, Dieter": "MA", "Scholz, Kelvin": "FA", "Schulz, Martin": "FA", "Sliwa, Nick": "MA", "Sälzler, Florian": "MA", "Sauter, Simon": "FA", "Simsek, Salih": "FA", "Stampfer, Manuel": "FA", "Steffens, Nico": "Polier", "Segmehl, Rainer": "Polier", "Thanner, Joachim Karl": "FA", "Török, Peter": "MA", "Traub-Prehn, Thomas": "MA", "Uhlig, Hartmut Peter": "FA", "Vespermann, Hans-Stephan": "MA", "Vaccaro, Vincenzo": "MA", "Wucher, Martin": "Polier", "Zabelaj, Shemsi": "FA", "Braun, Nico": "FA", "Bader, Jan": "FA", "Bajraj, Butrint": "FA", "Holl, Max": "FA", "Ljusanin, Kristian": "FA", "Roelandt, Sascha": "FA"};
+const berufVon = name => BERUF[name] || BERUF_VORGABE[name] || BERUF_VORGABE[String(name).replace(/\s+/g, ' ').trim()] || (name === SET.polier ? 'Polier' : 'MA');
 function neuerSL() { return Object.assign(neuerBericht(), { typ: 'sl', auftrag: '', auftragVom: '', agName: '', sigAG: '' }) }
 const tbEntwurf = () => (S.r && S.r.typ !== 'sl') ? S.r : S.tb;
 function slAktiv(sl) {
@@ -1160,7 +1170,7 @@ function pruefeSL(r) {
   if (r.geraete.length > 11) o.push({ t: 'w', s: 3, m: 'Mehr als 11 Geräte – das Formular hat nur 11 Zeilen.' });
   r.geraete.forEach(g => { if (!sumH(g)) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: keine Stunden.` }) });
   r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge)) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (m.ls && !m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto für die Anlage.` }) });
-  if (D.mat.length > 11) o.push({ t: 'w', s: 4, m: 'Mehr als 11 Materialarten – das Formular hat nur 11 Zeilen.' });
+  if (D.mat.length > 11) o.push({ t: 'w', s: 4, m: `${D.mat.length} Lieferscheine – das Formular hat nur 11 Zeilen. Alle Lieferscheine stehen im Excel-Blatt „Lieferscheine“ und als Fotos im PDF.` });
   if (!r.sig) o.push({ t: 'w', s: 5, m: 'Unterschrift Polier fehlt.' });
   if (!r.sigAG) o.push({ t: 'w', s: 5, m: 'Unterschrift Auftraggeber fehlt – kann auch später auf dem Ausdruck erfolgen.' });
   return o;
@@ -1182,7 +1192,7 @@ function docSL(r) {
   rows.push(`<td colspan="6" class="r sm">${D.pers.length ? 'Summe' : ''}</td><td class="r" style="font-weight:700">${D.pers.length ? fq(sumP) : ''}</td><td></td>${A(20)}`);
   rows.push(`<td colspan="8" rowspan="2" class="c" style="font-weight:700;font-size:12px">Eingebautes Material</td>${A(21)}`); rows.push(A(22));
   rows.push(`<td colspan="2" rowspan="2" class="c" style="font-weight:700">Menge</td><td colspan="6" rowspan="2" class="c" style="font-weight:700">Bezeichnung</td>${A(23)}`); rows.push(A(24));
-  for (let i = 0; i < 11; i++) { const m = D.mat[i]; rows.push(`<td class="r bi">${m ? fq(m.menge) : ''}</td><td class="c">${m ? E(EINH_TXT[m.einh] || m.einh) : ''}</td><td colspan="5" class="bi">${m ? E(m.mat + (m.lief ? ' (' + m.lief + ')' : '')) : ''}</td><td class="r sm">${m && m.ls.length ? m.ls.length + ' LS' : ''}</td>${A(25 + i)}`) }
+  for (let i = 0; i < 11; i++) { const m = D.mat[i]; rows.push(`<td class="r bi">${m ? fq(m.menge) : ''}</td><td class="c">${m ? E(EINH_TXT[m.einh] || m.einh) : ''}</td><td colspan="5" class="bi">${m ? E(m.mat + (m.lief ? ' (' + m.lief + ')' : '')) : ''}</td><td class="r sm">${m && m.ls.length ? 'LS ' + E(m.ls[0]) : ''}</td>${A(25 + i)}`) }
   rows.push(`<td colspan="8" rowspan="2" class="c" style="font-weight:700;font-size:12px">Vorhaltung von Maschinen, Geräte und Fahrzeuge</td>${A(36)}`); rows.push(A(37));
   rows.push(`<td rowspan="2" class="c" style="font-weight:700">Menge</td><td colspan="6" rowspan="2" class="c" style="font-weight:700">Bezeichnung</td><td rowspan="2" class="c" style="font-weight:700">Std.</td>${A(38)}`); rows.push(A(39));
   for (let i = 0; i < 11; i++) { const g = D.ger[i]; rows.push(`<td class="c">${g ? g.anz : ''}</td><td colspan="5" class="bi" style="font-size:9.5px">${g ? E(g.name) : ''}</td><td class="r sm">${g ? E(g.ks) : ''}</td><td class="r">${g ? fq(g.std) : ''}</td>${A(40 + i)}`) }
@@ -1325,7 +1335,7 @@ function docBTB(r) {
   return `<div class="a4"><table><colgroup>${COLS_L}<col></colgroup>
   ${rows.filter(x => x !== undefined).map(x => `<tr>${x}</tr>`).join('')}</table>${sigFoot(r, true)}</div>`;
 }
-function fitA4() { document.querySelectorAll('.a4box').forEach(b => { const a = b.querySelector('.a4'); const s = b.clientWidth / 794; a.style.transform = `scale(${s})`; b.style.height = (a.offsetHeight * s) + 'px' }) }
+function fitA4() { document.querySelectorAll('.a4box').forEach(b => { const a = b.querySelector('.a4'); if (!a) return; const s = b.clientWidth / 794; a.style.transform = `scale(${s})`; b.style.height = (a.offsetHeight * s) + 'px' }) }
 window.addEventListener('resize', fitA4);
 
 // ---------------------------------------------------------------- Unterschrift
@@ -1430,7 +1440,7 @@ async function seitenBild(html) {
 async function pdfErzeugen(r, art) {
   const { jsPDF } = window.jspdf; const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
   pdf.setProperties({ title: `${{ tb: 'Tagesbericht', btb: 'Bautagebuch', sl: 'Stundenlohnbericht' }[art]} ${r.baunr} ${dateDe(r.datum)}`, author: r.von, creator: 'Schwall Tagesbericht-App ' + APP_VERSION });
-  pdf.addImage(await seitenBild(art === 'sl' ? docSL(r) : art === 'tb' ? docTB(r) : docBTB(r)), 'JPEG', 0, 0, 210, 297);
+  pdf.addImage(await seitenBild(art === 'sl' ? docSL(r) : (await excelSeiten(r))[art]), 'JPEG', 0, 0, 210, 297);
   if (art === 'tb' || art === 'sl') {   // Anlage: Lieferschein-Fotos, 2 pro Seite
     const fotos = r.material.flatMap(m => m.fotos.map(f => [m, f]));
     for (let i = 0; i < fotos.length; i++) {
@@ -1442,6 +1452,16 @@ async function pdfErzeugen(r, art) {
   }
   return pdf.output('blob');
 }
+// Tagesbericht/Bautagebuch-Seiten direkt aus der ausgefüllten Excel-Vorlage zeichnen → PDF sieht aus wie die Excel
+const calibriDa = (() => { let e = null; return () => { if (e === null) { try { const c = document.createElement('canvas').getContext('2d'), t = 'mmmmmmmmmmlli1WW'; c.font = '20px monospace'; const a = c.measureText(t).width; c.font = '20px Calibri, monospace'; e = c.measureText(t).width !== a } catch (x) { e = false } } return e } })();
+let XS = { key: null, p: null };
+function excelSeiten(r) {
+  const key = JSON.stringify(r, (k, v) => k === 'fotos' || k === 'ocr' ? undefined : v);
+  if (XS.key !== key) { XS = { key, p: (async () => { const zip = await JSZip.loadAsync(await (await excelErzeugen(r)).arrayBuffer()), opt = { calibri: calibriDa() }; return { tb: await seiteHtml(zip, 'xl/worksheets/sheet1.xml', 1, 50, opt), btb: await seiteHtml(zip, 'xl/worksheets/sheet1.xml', 51, 100, opt) } })() }; XS.p.catch(() => { XS = { key: null, p: null } }) }
+  return XS.p;
+}
+let vorschauNr = 0;
+function vorschauLaden(r) { const nr = ++vorschauNr; setTimeout(async () => { if (nr !== vorschauNr) return; const box = $('#xvorschau'); if (!box) return; try { const s = await excelSeiten(r); if (nr !== vorschauNr || !$('#xvorschau')) return; $('#xvorschau').innerHTML = s[S.doc === 'btb' ? 'btb' : 'tb']; fitA4() } catch (e) { console.error(e); const b = $('#xvorschau'); if (b) b.innerHTML = '<div class="hint" style="padding:20px">Vorschau nicht möglich: ' + esc(e.message) + '</div>' } }, 350) }
 let VORLAGE = null;
 async function excelErzeugen(r) {   // füllt die Original-Excel-Vorlage (Tagesbericht + Bautagebuch + Blatt „Lohn“)
   if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();
@@ -1483,6 +1503,100 @@ function teilDateien(files) {
 function teilGrund() { return !navigator.share ? 'Dieser Browser hat keine Teilen-Funktion.' : !navigator.canShare ? 'Dieser Browser kann keine Dateien teilen.' : 'Der Browser lehnt die Dateien ab.' }
 const betreff = r => r.typ === 'sl' ? `Stundenlohnbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}` : `Tagesbericht ${wtag(r.datum)} ${dateDe(r.datum)} – Baustelle ${r.baunr} ${r.baustelle} – Polier ${r.von}`;
 const mailText = r => r.typ === 'sl' ? `${betreff(r)}\n\nStundenlohnbericht (PDF mit Lieferscheinen als Anlage, Excel)\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nAuftrag durch: ${r.auftrag || '–'}\nPolier: ${r.von}\nPersonal: ${r.personal.length} (${fq(r.personal.reduce((x, p) => x + sumH(p), 0))} h) · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n${r.sigAG ? 'Vom Auftraggeber unterschrieben' + (r.agName ? ' (' + r.agName + ')' : '') : 'Noch nicht vom Auftraggeber unterschrieben'}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)` : `${betreff(r)}\n\nTagesbericht und Bautagebuch\nBaustelle: ${r.baunr} ${r.baustelle}\nDatum: ${wtag(r.datum)}, ${dateDe(r.datum)}\nPolier: ${r.von}\nPersonal: ${r.personal.length} · Geräte: ${r.geraete.length} · Lieferscheine: ${r.material.length}\n\n(automatisch erstellt mit der Schwall Tagesbericht-App)`;
+
+// ---------------------------------------------------------------- Stundenübersicht (Tag / KW / Monat) aus gesendeten Tagesberichten
+// Je gesendetem Bericht ein kleiner Eintrag (ohne Fotos). „aktiv“ = zählt mit. Wird für denselben Tag und dieselbe
+// Baustelle ein neuer Bericht gesendet (z. B. Korrektur), zählt automatisch nur der neueste – der Polier kann das umstellen.
+function sbEintrag(r, gesendet) { return { id: r.id, datum: r.datum, baunr: r.baunr || '', baustelle: r.baustelle || '', gesendet: gesendet || Date.now(), aktiv: true, beginn: r.beginn, ende: r.ende, pause: r.pause, pers: r.personal.map(p => ({ n: p.name, nr: p.nr || '', h: p.zus ? 0 : Math.round(sumH(p) * 100) / 100, z: p.zus || '' })) } }
+function sbEinordnen(liste, e) {
+  liste = liste.filter(x => x.id !== e.id);
+  liste.forEach(x => { if (x.aktiv && x.datum === e.datum && x.baunr === e.baunr) { x.aktiv = false; x.ersetzt = true; x.geaendert = Date.now() } });
+  liste.unshift(e); const grenze = Date.now() - 400 * 864e5; return liste.filter(x => (x.gesendet || 0) > grenze).slice(0, 1500);
+}
+function sbAusVerlauf() { let l = []; HIST.slice().reverse().forEach(h => { l = sbEinordnen(l, sbEintrag(h, h.gesendet)) }); return l }
+async function sbMerken(r) { SB = sbEinordnen(SB, sbEintrag(r)); await DB.set('stundenbuch', SB) }
+document.addEventListener('change', async e => { const id = e.target.dataset && e.target.dataset.sbak; if (!id) return; const x = SB.find(q => q.id === id); if (!x) return; x.aktiv = e.target.checked; x.ersetzt = false; x.geaendert = Date.now(); await DB.set('stundenbuch', SB); render() });
+const isoTag = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10) };
+const tagPlus = (iso, n) => { const d = new Date(iso + 'T12:00'); d.setDate(d.getDate() + n); return isoTag(d) };
+function kwVon(iso) {
+  const d = new Date(iso + 'T12:00'), wt = (d.getDay() + 6) % 7, mo = tagPlus(iso, -wt);
+  const t = new Date(tagPlus(mo, 3) + 'T12:00'), j1 = new Date(t.getFullYear(), 0, 1, 12);
+  const kw = 1 + Math.floor(Math.round((t - j1) / 864e5) / 7);
+  return { kw, jahr: t.getFullYear(), mo, tage: [0, 1, 2, 3, 4, 5, 6].map(i => tagPlus(mo, i)) };
+}
+const monatTage = iso => { const [y, m] = iso.split('-').map(Number), n = new Date(y, m, 0).getDate(); return Array.from({ length: n }, (_, i) => `${y}-${String(m).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`) };
+const MONATE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+function svSchieben(iso, modus, d) { if (modus === 'tag') return tagPlus(iso, d); if (modus === 'kw') return tagPlus(iso, 7 * d); const [y, m] = iso.split('-').map(Number); return isoTag(new Date(y, m - 1 + d, 1, 12)) }
+const sbTage = (tage, alle) => SB.filter(e => tage.includes(e.datum) && (alle || e.aktiv));
+const sbSumme = e => e.pers.reduce((x, p) => x + p.h, 0);
+// Summen je Mitarbeiter → [[name, { nr, h, tage: { iso: { h, z: [], bs: [[baunr, h, kürzel]] } } }]]
+function sbSummen(eintraege) {
+  const M = {};
+  eintraege.forEach(e => e.pers.forEach(p => {
+    const x = M[p.n] || (M[p.n] = { nr: p.nr, tage: {}, h: 0 }), t = x.tage[e.datum] || (x.tage[e.datum] = { h: 0, z: [], bs: [] });
+    t.h += p.h; x.h += p.h; if (p.z && !t.z.includes(p.z)) t.z.push(p.z); t.bs.push([e.baunr, p.h, p.z]);
+  }));
+  return Object.entries(M).sort((a, b) => a[0].localeCompare(b[0], 'de'));
+}
+const zelleH = t => !t ? '' : t.h ? `<span style="${t.h > 10 ? 'color:var(--rot);font-weight:700' : ''}">${fmt(t.h)}</span>${t.z.length ? '<br><small>' + t.z.map(esc).join(' ') + '</small>' : ''}` : `<small style="color:var(--rot)">${t.z.map(esc).join(' ')}</small>`;
+function vStunden() {
+  if (!SV.datum) SV.datum = today();
+  const m = SV.modus, d = SV.datum;
+  let titel, tage;
+  if (m === 'tag') { titel = `${wtag(d)}, ${dateDe(d)}`; tage = [d] }
+  else if (m === 'kw') { const w = kwVon(d); titel = `KW ${w.kw} / ${w.jahr} · ${dShort(w.tage[0], '.')}–${dShort(w.tage[6], '.')}`; tage = w.tage }
+  else { titel = `${MONATE[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`; tage = monatTage(d) }
+  const alle = sbTage(tage, true).sort((a, b) => a.datum.localeCompare(b.datum) || (a.gesendet - b.gesendet)), akt = alle.filter(e => e.aktiv), S2 = sbSummen(akt);
+  const gesamt = S2.reduce((a, [, x]) => a + x.h, 0);
+  const kopf = `<div class="seg">${[['tag', 'Tag'], ['kw', 'Woche (KW)'], ['monat', 'Monat']].map(([k, t]) => `<button class="${m === k ? 'on' : ''}" data-act="svmodus" data-m="${k}">${t}</button>`).join('')}</div>
+  <div class="prow" style="margin-bottom:8px"><button class="btn small ghost" data-act="svnav" data-d="-1">‹</button><b style="text-align:center;flex:1">${titel}</b><button class="btn small ghost" data-act="svnav" data-d="1">›</button></div>
+  ${d !== today() ? '<button class="btn small ghost full" style="margin-bottom:8px" data-act="svheute">Zurück zu heute</button>' : ''}`;
+  const liste = `<div class="card"><b>Berichte (${akt.length} von ${alle.length} zählen)</b><div class="hint" style="margin-top:2px">Nur angehakte Berichte zählen. Wurde ein Bericht korrigiert und neu gesendet, zählt automatisch nur der neueste.</div>
+   ${alle.length ? alle.map(e => `<label class="check" style="cursor:pointer;margin:0;color:var(--txt);font-weight:400"><input type="checkbox" data-sbak="${e.id}" ${e.aktiv ? 'checked' : ''} style="width:22px;height:22px;flex:none;padding:0"><div style="flex:1"><b>${m === 'tag' ? '' : wtag(e.datum) + ' ' + dShort(e.datum, '.') + ' · '}${esc(e.baunr)}</b> ${esc(e.baustelle)}<br><small>${e.pers.length} Pers. · ${fq(sbSumme(e))} h · gesendet ${new Date(e.gesendet).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}${e.ersetzt ? ' · <span style="color:var(--gelb)">ältere Version, zählt nicht</span>' : ''}</small></div></label>`).join('') : '<div class="hint">Keine gesendeten Tagesberichte in diesem Zeitraum.</div>'}</div>`;
+  let tab = '';
+  if (S2.length && m === 'tag') {
+    const bs = [...new Set(akt.map(e => e.baunr))];
+    tab = `<div class="card" style="overflow-x:auto"><b>Stunden je Mitarbeiter</b><table class="sbt"><tr><th>Mitarbeiter</th>${bs.map(b => `<th>${esc(b)}</th>`).join('')}<th>Σ Tag</th></tr>
+    ${S2.map(([n, x]) => { const t = x.tage[d]; return `<tr><td>${esc(n)}</td>${bs.map(b => { const q = t.bs.filter(y => y[0] === b); return `<td>${q.map(y => y[2] ? `<small style="color:var(--rot)">${esc(y[2])}</small>` : fmt(y[1])).join(' + ')}</td>` }).join('')}<td class="sum1">${zelleH(t)}</td></tr>` }).join('')}
+    <tr class="sumz"><td>Summe</td>${bs.map(b => `<td>${fmt(akt.filter(e => e.baunr === b).reduce((a, e) => a + sbSumme(e), 0))}</td>`).join('')}<td>${fmt(gesamt)}</td></tr></table>
+    ${S2.some(([, x]) => x.tage[d].h > 10) ? '<div class="hint" style="color:var(--rot)">Rot = mehr als 10 Stunden an einem Tag – bitte prüfen.</div>' : ''}</div>`;
+  } else if (S2.length && m === 'kw') {
+    tab = `<div class="card" style="overflow-x:auto"><b>Stunden je Mitarbeiter und Tag</b><table class="sbt"><tr><th>Mitarbeiter</th>${tage.map(t => `<th><button class="lnk" data-act="svtag" data-datum="${t}">${wtag(t)}<br><small>${t.slice(8)}.</small></button></th>`).join('')}<th>Σ</th></tr>
+    ${S2.map(([n, x]) => `<tr><td>${esc(n)}</td>${tage.map(t => `<td>${zelleH(x.tage[t])}</td>`).join('')}<td class="sum1">${fmt(x.h)}</td></tr>`).join('')}
+    <tr class="sumz"><td>Summe</td>${tage.map(t => { const h = S2.reduce((a, [, x]) => a + (x.tage[t] ? x.tage[t].h : 0), 0); return `<td>${h ? fmt(h) : ''}</td>` }).join('')}<td>${fmt(gesamt)}</td></tr></table>
+    <div class="hint">Tag antippen = Baustellen dieses Tages.</div></div>`;
+  } else if (S2.length) {
+    const wochen = [...new Map(tage.map(t => { const w = kwVon(t); return [w.mo, w] })).values()];
+    const hW = (x, w) => w.tage.filter(t => tage.includes(t)).reduce((a, t) => a + (x.tage[t] ? x.tage[t].h : 0), 0);
+    tab = `<div class="card" style="overflow-x:auto"><b>Stunden je Mitarbeiter und KW</b><table class="sbt"><tr><th>Mitarbeiter</th>${wochen.map(w => `<th>KW ${w.kw}</th>`).join('')}<th>Tage</th><th>Σ</th></tr>
+    ${S2.map(([n, x]) => `<tr><td>${esc(n)}</td>${wochen.map(w => { const h = hW(x, w); return `<td>${h ? fmt(h) : ''}</td>` }).join('')}<td>${Object.values(x.tage).filter(t => t.h).length}</td><td class="sum1">${fmt(x.h)}</td></tr>`).join('')}
+    <tr class="sumz"><td>Summe</td>${wochen.map(w => { const h = S2.reduce((a, [, x]) => a + hW(x, w), 0); return `<td>${h ? fmt(h) : ''}</td>` }).join('')}<td></td><td>${fmt(gesamt)}</td></tr></table>
+    <div class="hint">Kürzel wie Ur oder Kr zählen als 0 Stunden.</div></div>`;
+  }
+  return kopf + tab + liste + (S2.length ? `<button class="btn ghost full" data-act="svcsv">⬇ Als Tabelle (CSV für Excel) speichern</button>` : '') + `<p class="small">Grundlage: deine gesendeten Tagesberichte auf diesem Handy (ca. 13 Monate). Stundenlohnberichte sind nicht enthalten.</p>`;
+}
+function svCsv() {
+  const m = SV.modus, d = SV.datum, tage = m === 'tag' ? [d] : m === 'kw' ? kwVon(d).tage : monatTage(d), akt = sbTage(tage);
+  const z = [['Datum', 'Baustellen-Nr.', 'Baustelle', 'Pers.-Nr.', 'Mitarbeiter', 'Stunden', 'Kürzel']];
+  akt.slice().sort((a, b) => a.datum.localeCompare(b.datum)).forEach(e => e.pers.forEach(p => z.push([dateDe(e.datum), e.baunr, e.baustelle, p.nr, p.n, fmt(p.h), p.z])));
+  const csv = '﻿' + z.map(r => r.map(v => /[;"\n]/.test(String(v ?? '')) ? '"' + String(v).replace(/"/g, '""') + '"' : (v ?? '')).join(';')).join('\r\n');
+  const w = kwVon(d), name = `Stunden-${(SET.polier || 'Polier').split(',')[0]}-${m === 'tag' ? d : m === 'kw' ? 'KW' + w.kw + '-' + w.jahr : d.slice(0, 7)}.csv`.replace(/\s+/g, '');
+  speichern([new File([csv], name, { type: 'text/csv' })]);
+}
+// Vor dem Versand: alle Stunden dieses Tages (andere gesendete Berichte + dieser Bericht)
+function tagVorVersand(r) {
+  if (!r.datum) return '';
+  const heute = sbTage([r.datum]).filter(e => e.id !== r.id), andere = heute.filter(e => !(e.baunr && e.baunr === r.baunr)), gleich = heute.filter(e => e.baunr && e.baunr === r.baunr);
+  if (!heute.length) return '';
+  const S2 = sbSummen([...andere, sbEintrag(r)]);
+  return `<h3>Tagesübersicht ${wtag(r.datum)}, ${dateDe(r.datum)}</h3><div class="card" style="overflow-x:auto">
+  ${gleich.length ? `<div class="hint" style="color:var(--gelb)">Für Baustelle ${esc(r.baunr)} wurde an diesem Tag schon ein Bericht gesendet. Dieser Bericht ersetzt ihn in der Stundenübersicht.</div>` : ''}
+  ${andere.length ? `<div class="hint">Weitere gesendete Berichte an diesem Tag: ${andere.map(e => esc(e.baunr) + ' ' + esc(e.baustelle)).join(', ')}</div>
+  <table class="sbt"><tr><th>Mitarbeiter</th>${andere.map(e => `<th>${esc(e.baunr)}</th>`).join('')}<th>dieser<br>${esc(r.baunr)}</th><th>Σ Tag</th></tr>
+  ${S2.map(([n, x]) => { const t = x.tage[r.datum], dies = r.personal.find(p => p.name === n); return `<tr><td>${esc(n)}</td>${andere.map(e => { const p = e.pers.find(q => q.n === n); return `<td>${p ? (p.z ? `<small>${esc(p.z)}</small>` : fmt(p.h)) : ''}</td>` }).join('')}<td>${dies ? (dies.zus ? `<small>${esc(dies.zus)}</small>` : fmt(sumH(dies))) : ''}</td><td class="sum1">${zelleH(t)}</td></tr>` }).join('')}</table>
+  ${S2.some(([, x]) => x.tage[r.datum].h > 10) ? '<div class="hint" style="color:var(--rot)">Rot = mehr als 10 Stunden an diesem Tag – bitte prüfen.</div>' : ''}` : ''}
+  <button class="btn small ghost" style="margin-top:6px" data-act="stunden" data-datum="${r.datum}">📅 Zur Stundenübersicht</button></div>`;
+}
 
 // ---------------------------------------------------------------- Versand
 function overlay(html) { let o = $('#ov'); if (!o) { o = document.createElement('div'); o.id = 'ov'; o.className = 'overlay'; document.body.appendChild(o) } o.innerHTML = `<div class="box2">${html}</div>`; return o }
@@ -1628,7 +1742,7 @@ async function abgeschlossen(weg, wartet) {
   const lsIds = new Set(r.material.map(m => m.lsid).filter(Boolean)); if (lsIds.size) { LSL.forEach(e => { if (lsIds.has(e.id)) e.uebernommen = { datum: r.datum, baunr: r.baunr, id: r.id } }); await lsSpeichern() }
   // Verlauf: kompletter Bericht (für „erneut senden“ und „wie letzter Bericht“), max. 30
   HIST = HIST.filter(h => h.id !== r.id); HIST.unshift(Object.assign(clone(r), { weg, gesendet: Date.now() })); HIST = behalten(HIST); HIST.forEach((h, i) => { if (i >= 10) h.material.forEach(m => m.fotos = []) });
-  await DB.set('history', HIST); if (!S.r || S.r.id === r.id) { await DB.del('draft'); S.r = null } S.prepared = null;
+  await DB.set('history', HIST); try { await sbMerken(r) } catch (e) { console.error(e) } if (!S.r || S.r.id === r.id) { await DB.del('draft'); S.r = null } S.prepared = null;
   overlay(`<div style="font-size:44px">✅</div><b style="font-size:18px">${wartet ? 'Gespeichert – wird gesendet, sobald Netz da ist' : weg === 'upload' ? 'Übertragen' : 'Versand geöffnet'}</b>
   <p class="small">${weg === 'mail' && !wartet ? 'Bitte prüfen, dass die E-Mail in deinem Mail-Programm wirklich abgeschickt wurde.' : ''}</p><button class="btn orange full" data-act="ovhome">Zur Startseite</button>`);
 }
@@ -1720,6 +1834,14 @@ document.addEventListener('click', async e => {
   if (a === 'speichern') speichern();
   if (a === 'download') download();
   if (a === 'sharepdf') sharePdf();
+  if (a === 'stunden') { SV.datum = SV.datum || today(); if (ds.datum) { SV.datum = ds.datum; SV.modus = 'tag' } S.view = 'stunden'; render(); scrollTo(0, 0) }
+  if (a === 'svmodus') { SV.modus = ds.m; render() }
+  if (a === 'svnav') { SV.datum = svSchieben(SV.datum, SV.modus, +ds.d); render() }
+  if (a === 'svheute') { SV.datum = today(); render() }
+  if (a === 'svtag') { SV.datum = ds.datum; SV.modus = 'tag'; render(); scrollTo(0, 0) }
+  if (a === 'svcsv') svCsv();
+  if (a === 'btbedit' && S.r) { S.r.btbArb = S.r.aps.filter(x => x.text).map(x => x.text).join('\n'); saveDraft(); render() }
+  if (a === 'btbauto' && S.r) { S.r.btbArb = ''; saveDraft(); render() }
   if (a === 'dateiliste') dateiListe(true);
   if (a === 'dlfertig') { closeOverlay(); abgeschlossen('mail') }
   if (a === 'ovclose') closeOverlay();

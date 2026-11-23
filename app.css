@@ -237,3 +237,5 @@ header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 
 /* Baustellen-Nr. mit Tastatur-Umschalter */
 .bnrfeld{display:flex;gap:6px;align-items:stretch}.bnrfeld input{flex:1;min-width:0}.bnrfeld .btn{flex:none;min-width:58px}
+.a4.xa4 td{height:auto;padding:0 2px;line-height:normal;text-overflow:clip;box-sizing:border-box}
+.sbt{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}.sbt th,.sbt td{border-bottom:1px solid var(--line);padding:5px 3px;text-align:right;white-space:nowrap}.sbt th:first-child,.sbt td:first-child{text-align:left;white-space:normal;min-width:96px}.sbt th{font-size:12px;color:var(--mut)}.sbt .sum1{font-weight:700}.sbt .sumz td{font-weight:700;border-top:2px solid var(--line)}.sbt .lnk{border:0;background:none;color:var(--orange);font-weight:700;font-size:12px;padding:0}
