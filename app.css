@@ -185,8 +185,8 @@ header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 .star.on{color:#ED7102}
 .sheet .it{justify-content:flex-start}
 /* ---------- Dunkelmodus (Android/iPhone „Dunkles Design“): eigene Farben, damit der Browser nicht selbst umfärbt ---------- */
-:root{color-scheme:light dark}
-.a4,.a4wrap,.paper,.offscreen,.sigpad{color-scheme:light}
+:root{color-scheme:light dark only}
+.a4,.a4wrap,.paper,.offscreen,.sigpad{color-scheme:light only}
 @media (prefers-color-scheme: dark){
   :root{--blau:#4a4a4a;--blau2:#555;--bg:#121212;--card:#1f1f1f;--txt:#f1f1f1;--mut:#b4b4b4;--rot:#ff6b6b;--gelb:#f0a640;--gruen:#5cc25f;--line:#3d3d3d}
   html,body{background:#ED7102}
@@ -246,3 +246,7 @@ header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 .a4 td.apnr{font-size:12px}
 .a4 td.T{border-top:2px solid #000}.a4 td.B{border-bottom:2px solid #000}.a4 td.L{border-left:2px solid #000}.a4 td.R{border-right:2px solid #000}
 .a4 td.ot{border-top:0}.a4 td.ob{border-bottom:0}
+.lstab tr.lsrunde td{background:#2b2b2b;color:#fff;font-weight:700;padding:7px 8px}
+/* Unterschriftsfeld immer weiß mit schwarzer Schrift – auch im Dunkelmodus */
+.sigpad{background:#fff !important;forced-color-adjust:none}
+@media (prefers-color-scheme: dark){.lstab tr.lsrunde td{background:#ED7102;color:#111}.sigpad{border-color:#bbb}}

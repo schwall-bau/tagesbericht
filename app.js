@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.17.1';
+const APP_VERSION = '1.18.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -97,7 +97,7 @@ async function importStammdaten(file) {
 async function init() {
   try {
     SD = sdErgaenzen(await DB.get('stammdaten')); SET = Object.assign(SET, await DB.get('settings') || {});
-    LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
+    LSR = await DB.get('lsrunden') || {}; LSL = (await DB.get('lsliste') || []).filter(e => !(e.uebernommen && Date.now() - e.zeit > 90 * 864e5)); LSL.forEach(e => { if (e.uebernommen && Date.now() - e.zeit > 30 * 864e5) e.fotos = [] });
     FAV = await DB.get('favoriten') || {}; HAEUFIG = await DB.get('haeufig') || {}; SLHIST = await DB.get('slhistory') || []; BERUF = await DB.get('berufe') || {}; S.sl = await DB.get('draft_sl') || null;
     HIST = await DB.get('history') || []; QUEUE = await DB.get('queue') || []; SB = await DB.get('stundenbuch') || sbAusVerlauf(); LERN = Object.assign({ alias: {}, lief: {} }, await DB.get('lernen') || {});
     if (!SD) { try { const r = await fetch('stammdaten.json', { cache: 'no-store' }); if (r.ok) { SD = sdErgaenzen(await r.json()); await DB.set('stammdaten', SD) } } catch (e) { } }
@@ -214,7 +214,7 @@ function vKopf() {
 </div>
 <div class="card">
  <label style="margin-top:0">Wetter</label><div class="chips">${SD.wetter.map(w => `<button class="chip ${r.wetter === w ? 'on' : ''}" data-wetter="${esc(w)}">${esc(w)}</button>`).join('')}</div>
- <div class="grid2"><div><label>Temperatur °C</label><input data-f="temp" inputmode="decimal" value="${esc(r.temp)}" placeholder="12"></div>
+ <div class="grid2"><div><label>Temperatur °C</label><div class="bnrfeld"><button type="button" class="btn small ghost" data-act="tempvz" title="Plus/Minus umschalten" style="min-width:48px;font-size:20px">±</button><input data-f="temp" inputmode="decimal" value="${esc(r.temp)}" placeholder="12"></div></div>
  <div><label>(Grund-)Wasserstand</label><input data-f="wasser" value="${esc(r.wasser)}" placeholder="optional"></div></div>
 </div>`;
 }
@@ -312,9 +312,9 @@ async function vorlageMitPruefung(h) { if (S.r && S.r._draft !== false && hatInh
 
 // ---------------------------------------------------------------- Lieferschein-Texterkennung (OCR, läuft auf dem Handy, offline)
 // Feste Ergänzungen der Stammdaten (bleiben auch nach Excel-Import erhalten)
-const EXTRA_LIEF = ['a+b', 'SWK', 'Ehinger Beton', 'Kessler'];
-const MIETE = ['LKW 3-Achser', 'LKW 4-Achser', 'Sattelzug', 'Traktor', 'Hängerzug', 'Bagger mit Bedienung'];
-const EXTRA_MAT = [...MIETE.map(n => [n, '', 'Std', 'Miete / Regie']), ['Aushub (Anlieferung)', '', 'm3', 'MKB'], ['AC 11 DS', '', 'to', 'Asphalt']];
+const EXTRA_LIEF = ['a+b', 'SWK', 'Ehinger Beton', 'Kessler', 'Biechele', 'Resoil', 'Transbeton', 'B&M', 'Wilhelm', 'HABA', 'Rief', 'Schoch', 'Baur', 'Haid', 'Liegl'];
+const MIETE = ['LKW 3-Achser', 'LKW 4-Achser', 'LKW Solo', 'Sattelzug', 'Traktor', 'Hängerzug', 'Bagger mit Bedienung'];
+const EXTRA_MAT = [...MIETE.map(n => [n, '', 'Std', 'Miete / Regie']), ['Aushub (Anlieferung)', '', 'm3', 'MKB'], ['AC 11 DS', '', 'to', 'Asphalt'], ['Sonstiges (divers)', '', '', 'Sonstiges'], ['Aushub DK 0', '', 'to', 'Entsorgung'], ['Aushub DK I', '', 'to', 'Entsorgung'], ['Aushub DK II', '', 'to', 'Entsorgung']];
 // Material-Nummern auf dem BSR Liefer- und Wiegeschein
 const BSR_CODES = { '60': 'Ablagerung Asphalt', '65': 'Ablagerung Beton', '86': 'Zuschlag für Übergröße', '01': 'Moränesand 0/2 gew.', '02': 'Moränesand 0/4 gew.', '03': 'Moränesand 0/8 gew.', '08': 'Moränekiessand-Gemisch 0/16 gew.', '09': 'Moränekiessand-Gemisch 0/32 gew.', '10': 'Schwemmsand', '15': 'Moräne Auffüllkies 4/X', '16': 'Auffüllkies 0/X', '17': 'Frostschutzkies 0/32', '37': 'Wiegen mit geeichter Waage', '44': 'Gemisch 0/16 gebrochen', '46': 'Frostschutzkies 0/45 güteüberwacht', '75': 'Beton-Bruch 0/45', '79': 'Beton-Schroppen 45/X', '82': 'Asphalt-Bruch' };
 function sdErgaenzen(sd) {
@@ -413,6 +413,12 @@ function wiegeNetto(t) {   // Brutto / Tara / Netto als drei Gewichte hintereina
   for (let i = 0; i + 2 < v.length; i++) if (v[i] > v[i + 1] && Math.abs(v[i] - v[i + 1] - v[i + 2]) < 0.05 && v[i + 2] > 0) return r2(v[i + 2]);
   return null;
 }
+// Brutto / Tara / Netto als Tonnen mit zwei Nachkommastellen (auch wenn „t“ als 1 gelesen wurde: „28.161“)
+function dreiGewichte(t, tol = 0.03) {
+  const v = [...t.matchAll(/\b(\d{1,2})[.,](\d{2})(?:\s?[t1lI]|\s*to)?\b/g)].map(x => +(x[1] + '.' + x[2]));
+  for (let i = 0; i + 2 < v.length; i++) if (v[i] > v[i + 1] && v[i + 2] > 0.5 && Math.abs(v[i] - v[i + 1] - v[i + 2]) < tol && v[i + 2] < v[i]) return r2(v[i + 2]);
+  return null;
+}
 const MIET_RE = [[/3\s*-?\s*achs/i, 'LKW 3-Achser'], [/4\s*-?\s*achs/i, 'LKW 4-Achser'], [/sattel/i, 'Sattelzug'], [/tra[ck]+tor/i, 'Traktor'], [/h[äa]nger|anh\./i, 'Hängerzug'], [/bagger|hydraulik/i, 'Bagger mit Bedienung']];
 const mietChips = () => MIETE.map(n => [n.replace('LKW ', ''), n, 'Std']);
 function regieStunden(t) {
@@ -439,14 +445,58 @@ function asphaltSorte(t) {
 }
 // Regeln je Lieferant: erkennen am Briefkopf, dann gezielt LS-Nr., Menge und Material lesen
 const LS_PROFILE = [
-  { id: 'BSR', name: 'Baustoffrecycling Laupheim (BSR)', lief: 'BSR', re: /baustoff\s*-?\s*recycling|kies-\s*und\s*sandvertrieb/i, einh: 'to', nurMat: true,
+  // ---- Lieferanten aus den Beispiel-Scans vom 24.11.2026 ----
+  // Biechele (vor BSR, weil im Briefkopf auch „Baustoffrecycling“ steht): Ausgangslieferschein, N = Netto, Material unter „Material“
+  { id: 'Biechele', name: 'Josef Biechele Kieswerk', lief: 'Biechele', re: /biechele|sch[oö]neb[uü]rg/i, einh: 'to', nurProfil: true,
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/ausgangs\s*-?\s*lieferschein\s*nr\.?\s*:?\s*(\d{5,8})/i))) o.ls = m[1];
+      if ((m = t.match(/\bN\s*[:.]?\s*(\d{1,3}[.,]\d{2})\s*t/))) o.menge = zahlDe(m[1]); else if (wiegeNetto(t) != null) o.menge = wiegeNetto(t);
+      if ((m = t.match(/material\s*\d{0,4}\s*\n\s*([A-ZÄÖÜ][^\n]{3,45})/i))) o.mat = m[1].replace(/\s+[^\w\s/]+.*$/, '').trim();
+      return o } },
+  // Resoil (Wiegeschein): Menge = Nettogewicht, Material = Aushub mit Belastungsstufe (DK 0 / DK I …)
+  { id: 'Resoil', name: 'Resoil Transporte und Verwertung', lief: 'Resoil', re: /resoil/i, einh: 'to', nurProfil: true,
+    chips: () => [['Aushub DK 0', 'Aushub DK 0', 'to'], ['Aushub DK I', 'Aushub DK I', 'to'], ['Aushub DK II', 'Aushub DK II', 'to'], ['Z 0', 'Aushub Z 0', 'to'], ['Z 1.1', 'Aushub Z 1.1', 'to']],
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/wiegeschein\s*-?\s*nr\.?\s*:?\s*(\d{4,8})/i))) o.ls = m[1];
+      if ((m = t.match(/netto\s*-?\s*gewicht\s*:?[\s\S]{0,40}?(\d{1,3}[.,]\d{2})\s*t/i))) o.menge = zahlDe(m[1]); else if (dreiGewichte(t, 1.2) != null) { o.menge = dreiGewichte(t, 1.2); o.mengeUnsicher = true } else if (wiegeNetto(t) != null) o.menge = wiegeNetto(t);
+      if ((m = t.match(/belastungs\s*-?\s*stufe\s*:?\s*(DK|Z)\s*([0IVl1.]{1,4})?/i))) o.mat = 'Aushub ' + m[1].toUpperCase() + ' ' + (m[2] || 'I').replace(/l/g, 'I').replace(/^1$/, 'I');
+      else if (/boden\s*und\s*steine/i.test(t)) o.mat = 'Aushub (Boden und Steine)';
+      return o } },
+  // Transbeton Biberach/Laupheim: Menge = „Ist“ bzw. Spalte „Menge (m³)“, Material = Verwendung (z. B. Sandbeton 4) oder Festigkeitsklasse
+  { id: 'Transbeton', name: 'Transbeton Biberach/Laupheim', lief: 'Transbeton', re: /trans\s*-?\s*beton|trans-beton\.de/i, einh: 'm3', nurProfil: true,
+    chips: () => [['Sandbeton 4', 'Sandbeton 4', 'm3'], ['C20/25', 'Beton C20/25', 'm3'], ['C25/30', 'Beton C25/30', 'm3'], ['C30/37', 'Beton C30/37', 'm3'], ['C8/10', 'Beton C8/10', 'm3'], ['Magerbeton', 'Magerbeton', 'm3']],
+    lese(t) { const o = {}; let m;
+      if ((m = t.match(/lieferschein\s*-?\s*nr\.?\s*:?\s*(\d{5,7})/i))) o.ls = m[1];
+      if ((m = t.match(/\bist\s*:?\s*(\d{1,2}[.,]\d{2})/i) || t.match(/^\s*(\d{1,2}[.,]\d{2})\s+\d{4,6}\b/m))) o.menge = zahlDe(m[1]);
+      if ((m = t.match(/sand\s*beton\s*(\d{1,2})?/i))) o.mat = 'Sandbeton' + (m[1] ? ' ' + m[1] : '');
+      else if ((m = t.match(/(?<!ab |bis |LC)\bC\s?(\d{1,2})\s?\/\s?(\d{2})\b(?!\s*bzw)/))) o.mat = `Beton C${m[1]}/${m[2]}`;
+      return o } },
+  // Händler: verschiedene Artikel → Material „Sonstiges (divers)“, ohne Menge
+  { id: 'BM', name: 'Bercher & Malejko (divers)', lief: 'B&M', re: /bercher|malejko|bm-granit/i, divers: true, nurProfil: true,
+    lese(t) { const m = t.match(/lieferschein\s*-?\s*nr\.?\s*:?\s*(\d{5,8})/i); return m ? { ls: m[1] } : {} } },
+  { id: 'Wilhelm', name: 'J. Wilhelm Baustoffe (divers)', lief: 'Wilhelm', re: /wilhelm\s*(gmbh|baustoffe)|wilhelm-laupheim|j\.\s*wilhelm|erwin-?\s*rentschler/i, divers: true, nurProfil: true,
+    lese(t) { const m = t.match(/beleg\s*-?\s*nr\.?[\s\S]{0,40}?\b(\d{6,8})\b/i) || t.match(/\b(50\d{5})\b/); return m ? { ls: m[1] } : {} } },
+  { id: 'HABA', name: 'HABA-Beton (divers)', lief: 'HABA', re: /haba\s*-?\s*beton|bartlechner/i, divers: true, nurProfil: true,
+    lese(t) { const m = t.match(/lieferschein[^\d]{0,25}(\d{7,9})/i) || t.match(/\b(100\d{5})\b/); return m ? { ls: m[1] } : {} } },
+  // Fuhrunternehmen mit (meist handschriftlichem) Rapport: Menge = Stunden, Material = LKW-Typ (Knopf), ohne Nummer → „Regie + Datum“
+  { id: 'Rief', name: 'Rief Transporte (Rapport)', lief: 'Rief', re: /rief\s*transporte|a[ßs]+mannshardt|mittenweiler/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/rapport\s*nr\.?\s*:?\s*(\d{3,6})/i))) o.ls = m[1]; o.menge = regieStunden(t); o.mat = angekreuzt(t) || regieMaterial(t, 'LKW 4-Achser'); return o } },
+  { id: 'Schoch', name: 'Schoch Holztransporte (Rapport)', lief: 'Schoch', re: /schoch|holztransporte|reinstetten/i, miete: true, chips: mietChips, nurProfil: true,
+    lese(t) { return { menge: regieStunden(t), mat: /solo/i.test(t) ? 'LKW Solo' : regieMaterial(t, 'LKW Solo') } } },
+  { id: 'Baur', name: 'Jakob Baur Hoch- und Tiefbau (Rapport)', lief: 'Baur', re: /jakob\s*-?\s*baur|balzheim|jakob-baur/i, miete: true, chips: mietChips,
+    nurProfil: true, lese(t) { return { menge: regieStunden(t), mat: angekreuzt(t) || 'LKW 4-Achser' } } },
+  { id: 'Haid', name: 'Andreas Haid Bagger/Baumaschinen (Rapport)', lief: 'Haid', re: /andreas\s*haid|orsenhausen|sandhalde|andreashaid/i, miete: true, chips: mietChips, nurProfil: true,
+    lese(t) { return { menge: regieStunden(t), mat: angekreuzt(t) || regieMaterial(t, 'LKW 4-Achser') } } },
+  { id: 'Liegl', name: 'Liegl GmbH (Rapport)', lief: 'Liegl', re: /\bliegl\b|liegl-laupheim/i, miete: true, chips: mietChips,
+    lese(t) { const o = {}; let m; if ((m = t.match(/lieferschein[^\d]{0,20}((?:\d\s?){5,6})/i))) o.ls = m[1].replace(/\s/g, ''); o.menge = regieStunden(t); o.mat = regieMaterial(t, 'LKW 4-Achser'); return o } },
+  { id: 'BSR', name: 'Baustoffrecycling Laupheim (BSR)', lief: 'BSR', re: /baustoff\s*-?\s*recycling|stoffrecycling\s*laupheim|kies-\s*und\s*sandvertrieb|und\s*sandvertrieb|motorw\.?\s*mat/i, einh: 'to', nurMat: true,
     chips: () => ['60', '65', '82', '75', '46', '17', '16'].map(k => [k + ' ' + BSR_CODES[k], BSR_CODES[k], 'to']),
     lese(t) { const o = {}; let m;
       if ((m = t.match(/wiegeschein\D{0,25}(\d{5,7})/i) || t.match(/\b(2\d{5})\b/))) o.ls = m[1];
       if ((m = t.match(/\bN\s*[:;.]\s*(\d{3,6})\s*kg/i))) o.menge = r2(+m[1] / 1000);
       else if (wiegeNetto(t) != null) o.menge = wiegeNetto(t);
       else { const ks = [...t.matchAll(/\b(\d{4,6})\s*[k&xX]?\s?[g9]\b/g)].map(x => +x[1]).filter(x => x >= 1000); if (ks.length) o.menge = r2(Math.min(...ks) / 1000) }
-      if ((m = t.match(/mat\.?\s*-?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
+      if ((m = t.match(/mat\.?\s*-?\s*nr\.?\s*[:.]?\s*(\d{2})\b/i) || t.match(/\b(\d{2})\s*\W{0,3}\s*mot\w*\.?\s*ma[tl]/i) || t.match(/motorw?\.?\s*ma[tl]\.?\s*n\w*\.?\s*:?\s*(\d{2})\b/i)) && BSR_CODES[m[1]]) o.mat = BSR_CODES[m[1]];
       return o } },
   // DAM Donau-Asphalt-Mischwerke (Heim-Gruppe), Wiegeschein: Nummer 26-51-12092, Sorte, Netto = Brutto − Tara
   { id: 'DAM', name: 'DAM Donau-Asphalt-Mischwerke', lief: 'DAM', re: /donau\s*-?\s*asp\s*h?alt|asphalt-?\s*mischwerke|waage-dam|heim-gruppe|\bDAM\b/i, einh: 'to',
@@ -477,6 +527,8 @@ const LS_PROFILE = [
       else if ((m = t.match(/fahrzeug\s*:?\s*([A-ZÄÖÜ]{1,3}\s*-\s*[A-Z]{1,2}\s*\d{1,4})/i))) o.ls = 'Fzg ' + m[1].replace(/\s+/g, ' ').toUpperCase();
       const g = t.match(/gewicht\D{0,12}(\d+(?:[.,]\d+)?)\s*(m3|m³|m\s*3|t|to)?/i), n = t.match(/(\d{1,2})\s*fuhren/i) || t.match(/wiegungen\D{0,6}(\d{1,2})/i);
       if (g && g[2]) { o.menge = r2(zahlDe(g[1]) * (n ? +n[1] : 1)); if (/m/i.test(g[2])) o.einh = 'm3' }
+      if (o.menge == null && (m = t.match(/gewicht\D{0,8}(\d{1,2}[.,]\d{2})\s*t/i))) o.menge = zahlDe(m[1]);
+      if (!o.mat && (m = t.match(/[Mm]ater\w{0,4}\s*[:.]?\s+([A-ZÄÖÜ][A-Za-zäöüß]+(?:\s+[A-Za-zäöüß]+)?(?:\s+\d{1,2}\s?\/\s?\d{1,3})?)/))) { const n = m[1].trim(), sm = SD.mat.find(x => x[0].toLowerCase().replace(/\s/g, '') === n.toLowerCase().replace(/\s/g, '')) || SD.mat.find(x => levD(x[0].toLowerCase(), n.toLowerCase(), 2) <= 2); if (sm) o.mat = sm[0]; else if (levD(n.split(/\s/)[0].toLowerCase(), 'aushub', 3) <= 3) { o.mat = 'Aushub (Anlieferung)'; o.einh = 'm3' } }
       if (/aushub/i.test(t)) { o.mat = 'Aushub (Anlieferung)'; o.einh = 'm3' }
       return o } },
   { id: 'SWK', name: 'SWK Schotterwerk Kirchen', lief: 'SWK', re: /schotterwerk|\bswk\b/i, einh: 'to',
@@ -598,6 +650,7 @@ function parseLieferschein(text) {
     out.profil = P.id; out.profilName = P.name; out.miete = !!P.miete;
     const o = P.lese(t);
     if (P.nurProfil) { delete out.ls; delete out.menge; delete out.mat }
+    if (P.nurMat) delete out.mat;
     for (const k of ['ls', 'menge', 'mat', 'matnr', 'einh', 'pos', 'lsUnsicher']) if (o[k] != null && o[k] !== '') out[k] = o[k];
     if (P.miete) { out.einh = 'Std'; if (!o.mat) delete out.mat; if (o.menge == null) delete out.menge; out.matnr = '' }
     else if (!out.einh) out.einh = o.einh || P.einh;
@@ -606,9 +659,20 @@ function parseLieferschein(text) {
   // Gelerntes je Lieferant: Einheit / Miete
   const L = out.lief && LERN.lief[out.lief];
   if (L) { if (!out.einh && L.einh) out.einh = L.einh; if (!P && L.miete > L.n / 2) { out.miete = true; out.einh = 'Std' } }
+  if (P && P.divers) { out.mat = 'Sonstiges (divers)'; out.matnr = ''; out.einh = ''; delete out.menge; out.divers = true }
+  const kz = kfzAus(t); if (kz) out.kfz = kz;
   const dm = [...t.matchAll(/\b(\d{1,2})\.(\d{1,2})\.(\d{2}|20\d{2})\b/g)].find(x => +x[1] >= 1 && +x[1] <= 31 && +x[2] >= 1 && +x[2] <= 12); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
   ['ls', 'menge', 'mat', 'lief'].forEach(k => { if (out[k] != null && out[k] !== '') out.felder.push(k) });
   return out;
+}
+// KFZ-Kennzeichen (für die Lieferschein-Liste, z. B. Asphalt-LKW): steht hinter „Kfz-Kennzeichen“, „Pol.-Kennzeichen“, „Fahrzeug“, „LKW-Nr.“
+const KFZ_RE = /\b([A-ZÄÖÜ]{1,3})\s*[-–]?\s*([A-Z]{1,2})\s*[-–]?\s*(\d{1,4})(\s?[EHT])?\b/;
+function kfzAus(t) {
+  for (const m of t.matchAll(/(kfz\s*-?\s*kennzeichen|pol\.?\s*-?\s*kennzeichen|kennzeichen|fahrzeug(?![\s-]*(?:nr|gesamt|f[üu]hrer))|lkw\s*-?\s*nr\.?)\s*[:.|]?\s*/gi)) {
+    const s = t.slice(m.index + m[0].length, m.index + m[0].length + 70), k = s.match(KFZ_RE);
+    if (k && !/^(DIN|EN|NR|KG|AG|LS|UFI|CE)$/.test(k[1]) && (k[1].length + k[2].length) >= 2) return `${k[1]}-${k[2]} ${k[3]}${(k[4] || '').trim()}`;
+  }
+  return '';
 }
 // Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag (bei mehreren Positionen mehrere Einträge)
 async function scanLieferscheine(files, zielId, ziel) {
@@ -629,6 +693,8 @@ async function scanLieferscheine(files, zielId, ziel) {
       if (res.mat && !m.mat) { m.mat = res.mat; m.matnr = res.matnr || ''; auto.push('mat') }
       if (res.einh && (!m.einh || res.miete)) m.einh = res.einh;
       if (res.lief && !m.lief) { m.lief = res.lief; auto.push('lief') }
+      if (res.kfz && !m.kfz) m.kfz = res.kfz;
+      if (res.divers) { m.einh = ''; m.divers = true }
       const prev = r.material.filter(x => x.id !== m.id && x.mat && x.lief === m.lief).pop();
       if (prev && !m.mat && !res.miete) { m.mat = prev.mat; m.matnr = prev.matnr; m.einh = prev.einh; auto.push('mat~') }
       const lm = m.lief ? lernMat(m.lief) : [];
@@ -977,6 +1043,10 @@ function telRender() {
 // Lieferscheine laufend scannen → fortlaufende Tabelle je Baustelle und Tag mit Tonnage; später in jeden Tagesbericht übernehmbar
 let LSL = [];
 const LSV = { baunr: '', datum: today(), offen: null };
+let LSR = {};   // aktuelle Runde je „Baustelle|Datum“ (z. B. 2. Runde Asphalt-LKW)
+const lsKey = () => LSV.baunr + '|' + LSV.datum;
+const rundeVon = e => e.runde || 1;
+const aktRunde = () => Math.max(LSR[lsKey()] || 1, ...lsTag(LSV.baunr, LSV.datum).map(rundeVon), 1);
 const lsSpeichern = () => DB.set('lsliste', LSL).catch(() => toast('Speichern fehlgeschlagen – Speicher voll?'));
 const lsTag = (b, d) => LSL.filter(e => e.baunr === b && e.datum === d).sort((x, y) => x.zeit - y.zeit);
 const EINH_TXT = { to: 't', m3: 'm³', Stk: 'Stk', Std: 'Std' };
@@ -987,6 +1057,7 @@ const lsFrei = e => !e.uebernommen;
 function vLieferscheine() {
   const bs = [...new Map([...HIST, ...LSL].filter(x => x.baunr).map(x => [x.baunr, x.baustelle || ''])).entries()];
   const tag = lsTag(LSV.baunr, LSV.datum), alle = LSL.filter(e => e.baunr === LSV.baunr);
+  const runden = [...new Set([...tag.map(rundeVon), aktRunde()])].sort((a, b) => a - b), mehrRunden = runden.length > 1;
   const tage = [...new Set(alle.map(e => e.datum))].sort().reverse();
   return `<div class="card">
    <div class="grid2"><div><label style="margin-top:0">Baustellen-Nr.</label>${bnrFeld(`id="ls_bnr" list="ls_bs"`, LSV.baunr, '26025')}</div>
@@ -996,11 +1067,13 @@ function vLieferscheine() {
    <div class="row"><span class="btn orange fotobtn">📷 Kamera<input type="file" accept="image/*" capture="environment" data-lsscan="1"></span><span class="btn ghost fotobtn">🖼️ Mehrere<input type="file" accept="image/*" multiple data-lsscan="1"></span></div>
    <button class="btn ghost small full" style="margin-top:8px" data-act="lshand">＋ Von Hand eintragen</button></div>
   <div class="card lssum"><div class="small">${wtag(LSV.datum)}, ${dateDe(LSV.datum)}${LSV.baunr ? ' · Baustelle ' + esc(LSV.baunr) : ''} · ${tag.length} Lieferschein(e)</div>
+   ${mehrRunden ? runden.map(rn => { const tr = tag.filter(e => rundeVon(e) === rn); return `<div class="lsmat"><span><b>Runde ${rn}</b>${rn === aktRunde() ? ' · aktuell' : ''}<br><small>${tr.length} LS · ${tr.length ? matSummen(tr) : 'noch leer'}</small></span><b>${tr.length ? mengenText(tr) : ''}</b></div>` }).join('') + '<div class="small" style="margin-top:6px"><b>Gesamt</b></div>' : ''}
    ${proMaterial(tag).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}<br><small>${l.length} Lieferschein(e)</small></span><b class="lsbig">${mengenText(l)}</b></div>`).join('') || '<div class="lsbig">0,00 t</div>'}
+   ${LSV.baunr ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" data-act="lsrunde">🔁 Neue Runde (jetzt: Runde ${aktRunde()})</button></div>` : ''}
    ${alle.length > tag.length ? `<details class="small" style="margin-top:6px"><summary>Baustelle gesamt (${alle.length} LS · ${tage.length} Tage)</summary>${proMaterial(alle).map(([k, l]) => `<div class="lsmat"><span>${esc(k)}</span><b>${l.length} × · ${mengenText(l)}</b></div>`).join('')}</details>` : ''}</div>
   <div class="card" style="padding:0;overflow:hidden"><table class="lstab"><tr><th>#</th><th>LS-Nr.</th><th>Lieferant / Material</th><th class="r">Menge</th></tr>
-   ${proMaterial(tag).map(([k, l]) => `<tr class="lsgrp"><td colspan="3">${esc(k)}</td><td class="r">${mengenText(l)}</td></tr>` + l.map((e, i) => `<tr data-lsedit="${e.id}" class="${e.uebernommen ? 'lsok' : ''} ${e.ocr && e.ocr.auto && e.ocr.auto.length ? 'lsauto' : ''}"><td>${i + 1}</td><td><b>${esc(e.ls) || '–'}</b><div class="small">${new Date(e.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</div></td><td>${esc(e.lief) || '?'}<div class="small">${esc(e.mat) || '<span style="color:var(--rot)">Material fehlt</span>'}${e.uebernommen ? ' · ✓ im Bericht ' + dShort(e.uebernommen.datum, '.') : ''}</div></td><td class="r"><b>${f2(e.menge) || '–'}</b> ${EINH_TXT[e.einh] || e.einh || ''}</td></tr>
-   ${LSV.offen === e.id ? `<tr><td colspan="4" style="background:#fafafa">${lsEditor(e)}</td></tr>` : ''}`).join('')).join('') || `<tr><td colspan="4"><div class="hint" style="padding:10px;text-align:center">Noch keine Lieferscheine für diesen Tag.</div></td></tr>`}
+   ${runden.map(rn => { const tr = tag.filter(e => rundeVon(e) === rn); return (mehrRunden ? `<tr class="lsrunde"><td colspan="3">Runde ${rn}${rn === aktRunde() ? ' (aktuell)' : ''}</td><td class="r">${tr.length ? mengenText(tr) : ''}</td></tr>` : '') + proMaterial(tr).map(([k, l]) => `<tr class="lsgrp"><td colspan="3">${esc(k)}</td><td class="r">${mengenText(l)}</td></tr>` + l.map((e, i) => `<tr data-lsedit="${e.id}" class="${e.uebernommen ? 'lsok' : ''} ${e.ocr && e.ocr.auto && e.ocr.auto.length ? 'lsauto' : ''}"><td>${i + 1}</td><td><b>${esc(e.ls) || '–'}</b><div class="small">${new Date(e.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}${e.kfz ? '<br>🚚 ' + esc(e.kfz) : ''}</div></td><td>${esc(e.lief) || '?'}<div class="small">${esc(e.mat) || '<span style="color:var(--rot)">Material fehlt</span>'}${e.uebernommen ? ' · ✓ im Bericht ' + dShort(e.uebernommen.datum, '.') : ''}</div></td><td class="r"><b>${f2(e.menge) || '–'}</b> ${EINH_TXT[e.einh] || e.einh || ''}</td></tr>
+   ${LSV.offen === e.id ? `<tr><td colspan="4" style="background:#fafafa">${lsEditor(e)}</td></tr>` : ''}`).join('')).join('') }).join('') || `<tr><td colspan="4"><div class="hint" style="padding:10px;text-align:center">Noch keine Lieferscheine für diesen Tag.</div></td></tr>`}
   </table></div>
   ${tage.length > 1 || (tage.length && tage[0] !== LSV.datum) ? `<div class="card"><b>Andere Tage dieser Baustelle</b><div class="lst">${tage.filter(d => d !== LSV.datum).map(d => { const l = lsTag(LSV.baunr, d); return `<div class="it" data-lsday="${d}" style="cursor:pointer"><span>${wtag(d)}, ${dateDe(d)}</span><span class="small">${l.length} LS · ${matSummen(l)}${l.every(e => e.uebernommen) ? ' · ✓' : ''}</span></div>` }).join('')}</div></div>` : ''}
   ${tag.some(lsFrei) ? `<button class="btn orange full" data-act="lsbericht">➜ ${tag.filter(lsFrei).length} Lieferscheine in den Tagesbericht übernehmen</button>` : ''}
@@ -1009,6 +1082,7 @@ function vLieferscheine() {
 function lsEditor(e) {
   return `<div class="grid2"><div><label>Lieferschein-Nr.</label><input data-lsf="${e.id}|ls" value="${esc(e.ls)}"></div><div><label>Menge ${e.einh ? '[' + esc(EINH_TXT[e.einh] || e.einh) + ']' : ''}</label><input data-lsf="${e.id}|menge" inputmode="decimal" value="${e.menge !== '' && e.menge != null ? fmt(num(e.menge)) : ''}"></div></div>
   <div class="grid2"><div><label>Lieferant</label>${pickBtn('lslief|' + e.id, e.lief || 'wählen …')}</div><div><label>Material</label>${pickBtn('lsmat|' + e.id, e.mat || 'wählen …')}</div></div>
+  <div class="grid2"><div><label>KFZ-Kennzeichen</label><input data-lsf="${e.id}|kfz" value="${esc(e.kfz || '')}" placeholder="z. B. BC-AB 7055" autocapitalize="characters"></div><div><label>Runde</label><div class="step"><button data-lsrd="${e.id}|-1">−</button><input value="${rundeVon(e)}" disabled style="width:52px;text-align:center"><button data-lsrd="${e.id}|1">＋</button></div></div></div>
   ${e.ocr && e.ocr.chips ? `<div class="chips" style="margin-top:8px">${e.ocr.chips.map((c, i) => `<button class="chip ${e.mat === c[1] ? 'on' : ''}" data-lschip="${e.id}|${i}">${esc(c[0])}</button>`).join('')}</div>` : ''}
   <div class="thumbs">${(e.fotos || []).map(f => `<img src="${f}">`).join('')}</div>
   ${e.ocr && e.ocr.profil ? `<div class="hint">🏷️ ${esc(e.ocr.profil)}</div>` : ''}
@@ -1019,7 +1093,7 @@ async function lsScan(files) {
   const tmp = { datum: LSV.datum, aps: [{ id: '_' }], material: lsTag(LSV.baunr, LSV.datum).map(e => Object.assign({}, e)) };
   const vorher = new Set(tmp.material.map(m => m.id));
   await scanLieferscheine(files, null, tmp);
-  tmp.material.filter(m => !vorher.has(m.id)).forEach(m => LSL.push({ id: m.id, baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: m.lief, mat: m.mat, matnr: m.matnr, einh: m.einh || 'to', ls: m.ls, menge: m.menge, fotos: m.fotos, ocr: m.ocr ? { auto: m.ocr.auto, profil: m.ocr.profil, chips: m.ocr.chips, kopf: m.ocr.kopf } : null }));
+  tmp.material.filter(m => !vorher.has(m.id)).forEach(m => LSL.push({ id: m.id, baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: m.lief, mat: m.mat, matnr: m.matnr, einh: m.einh || 'to', ls: m.ls, menge: m.menge, kfz: m.kfz || '', runde: aktRunde(), fotos: m.fotos, ocr: m.ocr ? { auto: m.ocr.auto, profil: m.ocr.profil, chips: m.ocr.chips, kopf: m.ocr.kopf } : null }));
   await lsSpeichern(); render();
 }
 // In den Tagesbericht übernehmen (ausgewählter Tag, nur noch nicht übernommene)
@@ -1048,7 +1122,7 @@ function lsPicker(r) {
 
 const behalten = list => list.filter((h, i) => i < 30 || Date.now() - (h.gesendet || 0) < 90 * 864e5).slice(0, 300);   // letzte 90 Tage (mind. 30 Berichte)
 // ---------------------------------------------------------------- Daten übertragen (PC ⇄ Handy) per Sync-Datei
-const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'stundenbuch', 'lsliste', 'lernen', 'berufe', 'favoriten', 'haeufig', 'stammdaten', 'settings'];
+const SYNC_KEYS = ['draft', 'draft_sl', 'history', 'slhistory', 'stundenbuch', 'lsrunden', 'lsliste', 'lernen', 'berufe', 'favoriten', 'haeufig', 'stammdaten', 'settings'];
 function syncDialog() {
   overlay(`<b style="font-size:18px">🔄 Daten übertragen</b>
   <p class="small" style="text-align:left">Damit PC und Handy denselben Stand haben:<br>1. Auf dem Gerät mit den neuesten Daten <b>Sync-Datei speichern</b> (z. B. in OneDrive oder per Mail an dich selbst).<br>2. Auf dem anderen Gerät <b>Sync-Datei einlesen</b>.<br>Es wird zusammengeführt, nichts gelöscht: gesendete Berichte, Lieferschein-Liste und Gelerntes von beiden Geräten bleiben erhalten; bei Entwürfen gilt der neuere.</p>
@@ -1073,6 +1147,7 @@ async function syncImport(file) {
   const neu = {};
   neu.history = nachId(L.history, I.history, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.history = behalten(neu.history);
   neu.slhistory = nachId(L.slhistory, I.slhistory, h => h.gesendet).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0)); neu.slhistory = behalten(neu.slhistory);
+  neu.lsrunden = Object.assign({}, I.lsrunden, L.lsrunden); Object.keys(I.lsrunden || {}).forEach(k => { neu.lsrunden[k] = Math.max((I.lsrunden || {})[k] || 1, (L.lsrunden || {})[k] || 1) });
   neu.stundenbuch = nachId(L.stundenbuch, I.stundenbuch, e => e.geaendert || e.gesendet || 0).sort((a, b) => (b.gesendet || 0) - (a.gesendet || 0));
   neu.lsliste = nachId(L.lsliste, I.lsliste, e => (e.uebernommen ? 1e13 : 0) + (e.geaendert || e.zeit || 0));
   const li = I.lernen || { alias: {}, lief: {} }, ll = L.lernen || { alias: {}, lief: {} }, lief = Object.assign({}, li.lief);
@@ -1169,7 +1244,7 @@ function pruefeSL(r) {
   r.personal.forEach(p => { if (!sumH(p)) o.push({ t: 'e', s: 2, m: `${esc(p.name)}: keine Stunden.` }); if (!p.beruf) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: Beruf fehlt.` }) });
   if (r.geraete.length > 11) o.push({ t: 'w', s: 3, m: 'Mehr als 11 Geräte – das Formular hat nur 11 Zeilen.' });
   r.geraete.forEach(g => { if (!sumH(g)) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: keine Stunden.` }) });
-  r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge)) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (m.ls && !m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto für die Anlage.` }) });
+  r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge) && !/divers|sonstiges/i.test(m.mat || '')) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (m.ls && !m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto für die Anlage.` }) });
   if (D.mat.length > 11) o.push({ t: 'w', s: 4, m: `${D.mat.length} Lieferscheine – das Formular hat nur 11 Zeilen. Alle Lieferscheine stehen im Excel-Blatt „Lieferscheine“ und als Fotos im PDF.` });
   if (!r.sig) o.push({ t: 'w', s: 5, m: 'Unterschrift Polier fehlt.' });
   if (!r.sigAG) o.push({ t: 'w', s: 5, m: 'Unterschrift Auftraggeber fehlt – kann auch später auf dem Ausdruck erfolgen.' });
@@ -1234,9 +1309,8 @@ function pruefe(r) {
   r.personal.forEach(p => { if (p.neu && !p.nr) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: neu, nicht in der Mitarbeiterliste – Büro ergänzt die Pers.-Nr.` }) });
   r.personal.forEach(p => { if (p.zus) return; const s = sumH(p); if (!s) o.push({ t: 'e', s: 2, m: `${esc(p.name)}: keine Stunden und kein Kürzel.` }); else if (Math.abs(s - d) > 0.01) o.push({ t: 'w', s: 2, m: `${esc(p.name)}: ${fq(s)} h, Arbeitszeit ist ${fq(d)} h.` }) });
   r.geraete.forEach(g => { if (!sumH(g)) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: keine Stunden.` }); if (/miet/i.test(g.name) && !g.firma) o.push({ t: 'w', s: 3, m: `${esc(g.name)}: Mietfirma fehlt.` }) });
-  r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge)) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (!m.ls) o.push({ t: 'w', s: 4, m: `${esc(m.mat || 'Material')}: Lieferschein-Nr. fehlt.` }); else if (!m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto.` }) });
+  r.material.forEach(m => { if (!m.mat) o.push({ t: 'e', s: 4, m: 'Material ohne Bezeichnung.' }); if (!num(m.menge) && !/divers|sonstiges/i.test(m.mat || '')) o.push({ t: 'e', s: 4, m: `${esc(m.mat || 'Material')}: Menge fehlt.` }); if (!m.ls) o.push({ t: 'w', s: 4, m: `${esc(m.mat || 'Material')}: Lieferschein-Nr. fehlt.` }); else if (!m.fotos.length) o.push({ t: 'w', s: 4, m: `Lieferschein ${esc(m.ls)}: kein Foto.` }) });
   const p = toMin(r.pause), netto = (toMin(r.ende) - toMin(r.beginn) - p) / 60;
-  if (netto > 9 && p < 45) o.push({ t: 'w', s: 5, m: 'Über 9 h Arbeitszeit: mind. 45 Min. Pause (ArbZG).' }); else if (netto > 6 && p < 30) o.push({ t: 'w', s: 5, m: 'Über 6 h Arbeitszeit: mind. 30 Min. Pause (ArbZG).' });
   if (toMin(r.ende) <= toMin(r.beginn)) o.push({ t: 'e', s: 5, m: 'Ende liegt vor Beginn.' });
   if (!r.sig) o.push({ t: 'w', s: 5, m: 'Unterschrift fehlt.' });
   return o;
@@ -1777,6 +1851,7 @@ document.addEventListener('click', async e => {
   const t = e.target.closest('button,[data-go],[data-delfoto],[data-lsedit],[data-lsday]'); if (!t) return; const ds = t.dataset; const r = S.r;
   if (ds.lsedit) { LSV.offen = LSV.offen === ds.lsedit ? null : ds.lsedit; render(); return }
   if (ds.lsday) { LSV.datum = ds.lsday; LSV.offen = null; render(); scrollTo(0, 0); return }
+  if (ds.lsrd) { const [id, d] = ds.lsrd.split('|'); const e = LSL.find(x => x.id === id); if (e) { e.runde = Math.max(1, Math.min(aktRunde() + 1, rundeVon(e) + +d)); e.geaendert = Date.now(); await lsSpeichern(); render() } return }
   if (ds.lsdel) { if (await bestaetigen('Diesen Lieferschein aus der Liste löschen?')) { LSL = LSL.filter(e => e.id !== ds.lsdel); await lsSpeichern(); render() } return }
   if (ds.lschip) { const [id, i] = ds.lschip.split('|'); const e = LSL.find(x => x.id === id); const c = e.ocr.chips[+i]; e.mat = c[1]; e.einh = c[2] || e.einh; e.geaendert = Date.now(); await lsSpeichern(); render(); return }
   if (ds.view) { S.view = ds.view; render(); scrollTo(0, 0); return }
@@ -1824,7 +1899,9 @@ document.addEventListener('click', async e => {
   if (a === 'telvoice') { TEL.voice = !TEL.voice; if (!TEL.voice) try { speechSynthesis.cancel() } catch (e) { } telRender() }
   if (a === 'telende') telEnde(true);
   if (a === 'lsliste') { if (!LSV.baunr) LSV.baunr = (S.r && S.r.baunr) || (HIST[0] && HIST[0].baunr) || ''; LSV.datum = today(); LSV.offen = null; S.view = 'lieferscheine'; render(); scrollTo(0, 0) }
-  if (a === 'lshand') { if (!LSV.baunr) { toast('Bitte zuerst die Baustellen-Nr. eintragen'); return } const prev = lsTag(LSV.baunr, LSV.datum).pop(); const e = { id: uid(), baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: prev ? prev.lief : '', mat: prev ? prev.mat : '', matnr: prev ? prev.matnr : '', einh: prev ? prev.einh : 'to', ls: '', menge: '', fotos: [], ocr: null }; LSL.push(e); LSV.offen = e.id; await lsSpeichern(); render() }
+  if (a === 'tempvz' && S.r) { const v = String(S.r.temp || '').trim(); S.r.temp = v.startsWith('-') ? v.slice(1) : '-' + (v || ''); saveDraft(); render(); const i = document.querySelector('[data-f="temp"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length) } return }
+  if (a === 'lsrunde') { const k = lsKey(), jetzt = aktRunde(); if (!lsTag(LSV.baunr, LSV.datum).some(e => rundeVon(e) === jetzt)) { toast(`Runde ${jetzt} ist noch leer – neue Lieferscheine zählen schon dort.`); return } LSR[k] = jetzt + 1; await DB.set('lsrunden', LSR); toast(`Runde ${jetzt + 1} gestartet – neue Lieferscheine werden ab jetzt hier gezählt.`, 3500); render(); return }
+  if (a === 'lshand') { if (!LSV.baunr) { toast('Bitte zuerst die Baustellen-Nr. eintragen'); return } const prev = lsTag(LSV.baunr, LSV.datum).pop(); const e = { id: uid(), baunr: LSV.baunr, datum: LSV.datum, zeit: Date.now(), lief: prev ? prev.lief : '', mat: prev ? prev.mat : '', matnr: prev ? prev.matnr : '', einh: prev ? prev.einh : 'to', ls: '', menge: '', kfz: '', runde: aktRunde(), fotos: [], ocr: null }; LSL.push(e); LSV.offen = e.id; await lsSpeichern(); render() }
   if (a === 'lsbericht') {
     const tag = lsTag(LSV.baunr, LSV.datum);
     if (!S.r || !(S.r.baustelle || S.r.personal.length || S.r.material.length)) { S.r = neuerBericht(); const h = HIST.find(x => x.baunr === LSV.baunr); Object.assign(S.r, { baunr: LSV.baunr, datum: LSV.datum }, h ? { baustelle: h.baustelle, bauteil: h.bauteil, bauherr: h.bauherr } : {}) }
