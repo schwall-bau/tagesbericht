@@ -126,6 +126,7 @@
     ct = ct.replace('</Types>', '<Override PartName="/xl/worksheets/sheet9.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
     zip.file('[Content_Types].xml', ct);
     try { await formelnRechnen(zip, S1, 'Blanko') } catch (e) { console.error('Formeln', e) }
+    try { await schriftArial(zip) } catch (e) { console.error('Schrift', e) }
     return zip.generateAsync({ type: typeof window !== 'undefined' ? 'arraybuffer' : 'nodebuffer', compression: 'DEFLATE' });
   }
 
@@ -192,6 +193,7 @@
     let ct2 = await zip.file('[Content_Types].xml').async('string');
     ct2 = ct2.replace('</Types>', '<Override PartName="/xl/worksheets/sheet9.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'); zip.file('[Content_Types].xml', ct2);
     try { await formelnRechnen(zip, S1, 'Blanko') } catch (e) { console.error('Formeln', e) }
+    try { await schriftArial(zip) } catch (e) { console.error('Schrift', e) }
     return zip.generateAsync({ type: typeof window !== 'undefined' ? 'arraybuffer' : 'nodebuffer', compression: 'DEFLATE' });
   }
   root.slFuellen = slFuellen; root.slDaten = slDaten;
@@ -342,102 +344,10 @@
   }
   const EINGEBAUT = { 0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 14: 'dd.mm.yyyy', 15: 'd-mmm-yy', 20: 'h:mm', 21: 'h:mm:ss', 22: 'dd.mm.yyyy h:mm', 49: '@' };
 
-  // ---------------------------------------------------------------- Blatt (Bereich) als HTML zeichnen – Grundlage für das PDF
-  async function blattHtml(zip, blattPfad, zeileVon, zeileBis, opt = {}) {
-    const st = await zip.file('xl/styles.xml').async('string'), th = zip.file('xl/theme/theme1.xml') ? await zip.file('xl/theme/theme1.xml').async('string') : '';
-    const sheet = await zip.file(blattPfad).async('string'), Z = zellenLesen(sheet, await sharedStrings(zip));
-    const themeF = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'].map(k => { const m = th.match(new RegExp('<a:' + k + '>[\\s\\S]*?(?:lastClr|val)="([0-9A-Fa-f]{6})"')); return m ? m[1] : (k === 'lt1' ? 'FFFFFF' : '000000') });
-    const IDX = { 8: '000000', 9: 'FFFFFF', 10: 'FF0000', 64: '000000', 81: '000000' };
-    const farbe = (a) => { if (!a) return null; let rgb = (a.match(/rgb="([0-9A-Fa-f]{8}|[0-9A-Fa-f]{6})"/) || [])[1]; if (rgb) rgb = rgb.slice(-6); const t = (a.match(/theme="(\d+)"/) || [])[1]; if (!rgb && t != null) rgb = themeF[+t] || '000000'; const ix = (a.match(/indexed="(\d+)"/) || [])[1]; if (!rgb && ix != null) rgb = IDX[ix] || '000000'; if (!rgb) return null;
-      const tint = parseFloat((a.match(/tint="([-\d.E]+)"/) || [])[1] || 0); let c = [0, 2, 4].map(i => parseInt(rgb.substr(i, 2), 16)); if (tint) c = c.map(x => Math.round(tint < 0 ? x * (1 + tint) : x + (255 - x) * tint)); return '#' + c.map(x => x.toString(16).padStart(2, '0')).join('') };
-    const teil = (tag) => { const m = st.match(new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)</' + tag + '>')); return m ? m[1] : '' };
-    const numFmts = {}; for (const m of st.matchAll(/<numFmt numFmtId="(\d+)" formatCode="([^"]*)"/g)) numFmts[m[1]] = xmlText(m[2]);
-    const fonts = [...teil('fonts').matchAll(/<font>([\s\S]*?)<\/font>|<font\/>/g)].map(m => { const f = m[1] || ''; return { b: /<b\/>/.test(f), i: /<i\/>/.test(f), u: /<u\/>|<u /.test(f), sz: parseFloat((f.match(/<sz val="([\d.]+)"/) || [])[1] || 11), name: (f.match(/<name val="([^"]+)"/) || [])[1] || 'Calibri', color: farbe((f.match(/<color ([^>]*)\/>/) || [])[1]) } });
-    const fills = [...teil('fills').matchAll(/<fill>([\s\S]*?)<\/fill>/g)].map(m => /patternType="solid"/.test(m[1]) ? farbe((m[1].match(/<fgColor ([^>]*)\/>/) || [])[1]) : null);
-    const kante = (b, side) => { const m = b.match(new RegExp('<' + side + '(?: style="(\\w+)")?[^>]*?(?:/>|>([\\s\\S]*?)</' + side + '>)')); if (!m || !m[1]) return null; const w = { thin: '1px solid', hair: '1px solid', medium: '2px solid', thick: '3px solid', dashed: '1px dashed', mediumDashed: '2px dashed', dotted: '1px dotted', double: '3px double', dashDot: '1px dashed', mediumDashDot: '2px dashed', dashDotDot: '1px dotted', slantDashDot: '2px dashed' }[m[1]] || '1px solid'; return w + ' ' + (farbe((m[2] || '').match(/<color ([^>]*)\/>/)?.[1]) || '#000') };
-    const borders = [...teil('borders').matchAll(/<border(?:\s[^>]*)?>([\s\S]*?)<\/border>|<border\/>/g)].map(m => { const b = m[1] || ''; return { l: kante(b, 'left'), r: kante(b, 'right'), t: kante(b, 'top'), b: kante(b, 'bottom') } });
-    const xfs = [...teil('cellXfs').matchAll(/<xf ([^>]*?)(?:\/>|>([\s\S]*?)<\/xf>)/g)].map(m => { const a = m[1], al = ((m[2] || '').match(/<alignment ([^>]*)\/>/) || [])[1] || ''; const g = k => (a.match(new RegExp(k + '="([^"]*)"')) || [])[1]; const ga = k => (al.match(new RegExp(k + '="([^"]*)"')) || [])[1];
-      return { nf: +(g('numFmtId') || 0), font: fonts[+(g('fontId') || 0)] || fonts[0], fill: fills[+(g('fillId') || 0)], bd: borders[+(g('borderId') || 0)] || {}, h: ga('horizontal'), v: ga('vertical') || 'bottom', wrap: ga('wrapText') === '1', rot: +(ga('textRotation') || 0) } });
-    // Spalten / Zeilen
-    const breite = {}, versteckt = {}; const std = parseFloat((sheet.match(/defaultColWidth="([\d.]+)"/) || [])[1] || 8.43);
-    for (const m of sheet.matchAll(/<col ([^>]*)\/>/g)) { const a = m[1], mi = +(a.match(/min="(\d+)"/) || [])[1], ma = Math.min(+(a.match(/max="(\d+)"/) || [])[1], 60), w = parseFloat((a.match(/width="([\d.]+)"/) || [])[1] || std); for (let c = mi; c <= ma; c++) { breite[c] = w; versteckt[c] = /hidden="1"/.test(a) } }
-    const rowH = {}, rowHid = {}, stdH = parseFloat((sheet.match(/defaultRowHeight="([\d.]+)"/) || [])[1] || 15);
-    for (const m of sheet.matchAll(/<row r="(\d+)"([^>]*)>/g)) { const h = (m[2].match(/ ht="([\d.]+)"/) || [])[1]; if (h) rowH[m[1]] = +h; if (/hidden="1"/.test(m[2])) rowHid[m[1]] = 1 }
-    const colMax = opt.colBis || 26, cols = []; for (let c = opt.colVon || 1; c <= colMax; c++) if (!versteckt[c]) cols.push(c);
-    const px = c => Math.trunc((breite[c] ?? std) * 7 + 0.5);
-    const zeigeNull = !/showZeros="0"/.test(sheet);
-    // verbundene Zellen
-    const merge = {}, verdeckt = new Set();
-    for (const m of sheet.matchAll(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\/>/g)) { const c1 = colNr(m[1]), r1 = +m[2], c2 = colNr(m[3]), r2 = +m[4]; merge[m[1] + m[2]] = { c1, r1, c2, r2 }; for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (r !== r1 || c !== c1) verdeckt.add(colBuch(c) + r) }
-    const istCalibri = await opt.calibri;
-    const fontCss = f => { const fam = /calibri/i.test(f.name) ? (istCalibri ? 'Calibri, Carlito' : 'Carlito, "Liberation Sans Narrow", "Arial Narrow", Arial') : f.name + ', Arial'; const sz = f.sz * 4 / 3 * (/calibri/i.test(f.name) && !istCalibri ? 0.92 : 1);
-      return `font-family:${fam},sans-serif;font-size:${sz.toFixed(2)}px;${f.b ? 'font-weight:700;' : ''}${f.i ? 'font-style:italic;' : ''}${f.u ? 'text-decoration:underline;' : ''}${f.color && f.color !== '#000000' ? 'color:' + f.color + ';' : ''}` };
-    const anzeige = (c, x) => { if (!c || c.v == null || c.v === '') return ''; if (istErr(c.v)) return ''; if (typeof c.v === 'boolean') return c.v ? 'WAHR' : 'FALSCH'; if (typeof c.v === 'number') { if (c.v === 0 && !zeigeNull) return ''; return zahlFormat(c.v, numFmts[x.nf] || EINGEBAUT[x.nf] || 'General') } return String(c.v) };
-    const leer = (c, r) => { const k = colBuch(c) + r; const z = Z.get(k); return !verdeckt.has(k) && !merge[k] && (!z || z.v == null || z.v === '' || (z.v === 0 && !zeigeNull)) };
-    let html = '', y = 0; const rowsY = {};
-    for (let r = zeileVon; r <= zeileBis; r++) {
-      rowsY[r] = y; if (rowHid[r]) continue; const h = (rowH[r] || stdH) * 4 / 3; y += h;
-      let tr = `<tr style="height:${h.toFixed(2)}px">`;
-      for (const c of cols) {
-        const ref = colBuch(c) + r; if (verdeckt.has(ref)) continue;
-        const z = Z.get(ref), x = xfs[z && z.s != null ? +z.s : 0] || xfs[0], mg = merge[ref];
-        let span = '', bd = x.bd;
-        if (mg) { const cs = cols.filter(q => q >= mg.c1 && q <= mg.c2).length, rs = Math.min(mg.r2, zeileBis) - mg.r1 + 1; span = (cs > 1 ? ` colspan="${cs}"` : '') + (rs > 1 ? ` rowspan="${rs}"` : '');
-          const xf = rr => xfs[+(Z.get(rr)?.s ?? 0)] || xfs[0]; bd = { l: x.bd.l, t: x.bd.t, r: xf(colBuch(mg.c2) + mg.r1).bd.r, b: xf(colBuch(mg.c1) + mg.r2).bd.b } }
-        const txt = anzeige(z, x), num = z && typeof z.v === 'number';
-        const ha = x.h === 'centerContinuous' ? 'center' : x.h && x.h !== 'general' ? x.h : (num ? 'right' : 'left');
-        const va = x.v === 'center' ? 'middle' : x.v === 'top' ? 'top' : 'bottom';
-        let css = `${fontCss(x.font)}text-align:${ha === 'justify' || ha === 'distributed' ? 'left' : ha};vertical-align:${va};`;
-        if (x.fill) css += `background:${x.fill};`;
-        css += `border-left:${bd.l || 'none'};border-right:${bd.r || 'none'};border-top:${bd.t || 'none'};border-bottom:${bd.b || 'none'};`;
-        let inner = esc(txt).replace(/\n/g, '<br>');
-        if (x.rot === 90 && txt) inner = `<div style="writing-mode:vertical-rl;transform:rotate(180deg);white-space:normal;line-height:1.05;margin:0 auto;max-height:${((mg ? mg.r2 - mg.r1 + 1 : 1) * stdH * 4 / 3 - 4).toFixed(0)}px;overflow:hidden">${inner}</div>`, css += 'padding:2px 0;';
-        else if (x.wrap || mg && mg.r2 > mg.r1) css += 'white-space:normal;word-wrap:break-word;line-height:1.1;overflow:hidden;';
-        else { // wie Excel: Text läuft in leere Nachbarzellen weiter
-          const frei = ha === 'left' && !num && txt && !mg && leer(c + 1, r);
-          css += frei ? 'white-space:nowrap;overflow:visible;' : 'white-space:nowrap;overflow:hidden;';
-          if (frei) inner = `<span style="position:relative;z-index:1">${inner}</span>`;
-        }
-        tr += `<td${span} style="${css}">${inner}</td>`;
-      }
-      html += tr + '</tr>';
-    }
-    // Bilder (Logo, Unterschrift)
-    let bilder = '';
-    const sRels = zip.file(blattPfad.replace(/worksheets\/(sheet\d+\.xml)$/, 'worksheets/_rels/$1.rels'));
-    const drId = (sheet.match(/<drawing r:id="([^"]+)"/) || [])[1];
-    if (sRels && drId) {
-      const rl = await sRels.async('string'), tgt = (rl.match(new RegExp('Id="' + drId + '"[^>]*Target="([^"]+)"')) || rl.match(new RegExp('Target="([^"]+)"[^>]*Id="' + drId + '"')) || [])[1];
-      const dPfad = tgt && 'xl/' + tgt.replace(/^\.\.\//, '').replace(/^\/xl\//, ''), dF = dPfad && zip.file(dPfad);
-      if (dF) {
-        const dx = await dF.async('string'), dRelF = zip.file(dPfad.replace(/drawings\/(drawing\d+\.xml)$/, 'drawings/_rels/$1.rels')), dRel = dRelF ? await dRelF.async('string') : '';
-        const xVon = c => cols.filter(q => q < c + 1).reduce((a, q) => a + px(q), 0);
-        for (const m of dx.matchAll(/<xdr:(oneCellAnchor|twoCellAnchor)[^>]*>([\s\S]*?)<\/xdr:\1>/g)) {
-          const a = m[2], f = a.match(/<xdr:from><xdr:col>(\d+)<\/xdr:col><xdr:colOff>(-?\d+)<\/xdr:colOff><xdr:row>(\d+)<\/xdr:row><xdr:rowOff>(-?\d+)<\/xdr:rowOff><\/xdr:from>/); if (!f) continue;
-          const row = +f[3] + 1; if (row < zeileVon || row > zeileBis) continue;
-          const emb = (a.match(/r:embed="([^"]+)"/) || [])[1]; const ziel = emb && (dRel.match(new RegExp('Id="' + emb + '"[^>]*Target="([^"]+)"')) || [])[1]; if (!ziel) continue;
-          const mf = zip.file('xl/' + ziel.replace(/^\.\.\//, '')); if (!mf) continue;
-          const ext = a.match(/<xdr:ext cx="(\d+)" cy="(\d+)"/) || a.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
-          const x0 = xVon(+f[1]) + f[2] / 9525, y0 = rowsY[row] + f[4] / 9525, w = ext ? ext[1] / 9525 : 100, hh = ext ? ext[2] / 9525 : 40;
-          const typ = /\.jpe?g$/i.test(ziel) ? 'jpeg' : 'png';
-          bilder += `<img src="data:image/${typ};base64,${await mf.async('base64')}" style="position:absolute;left:${x0.toFixed(1)}px;top:${y0.toFixed(1)}px;width:${w.toFixed(1)}px;height:${hh.toFixed(1)}px">`;
-        }
-      }
-    }
-    const breiteGes = cols.reduce((a, q) => a + px(q), 0);
-    return { html: `<table style="border-collapse:collapse;table-layout:fixed;width:${breiteGes}px"><colgroup>${cols.map(q => `<col style="width:${px(q)}px">`).join('')}</colgroup>${html}</table>${bilder}`, breite: breiteGes, hoehe: y };
-  }
-  // Seite wie beim Excel-Druck: A4 hochkant, Ränder und Skalierung aus der Vorlage
-  async function seiteHtml(zip, blattPfad, zeileVon, zeileBis, opt = {}) {
-    const sheet = await zip.file(blattPfad).async('string');
-    const pm = sheet.match(/<pageMargins left="([\d.]+)" right="([\d.]+)" top="([\d.]+)" bottom="([\d.]+)"/) || [0, 0.7, 0.7, 0.75, 0.75];
-    const scale = +((sheet.match(/<pageSetup[^>]*scale="(\d+)"/) || [])[1] || 100) / 100;
-    const b = await blattHtml(zip, blattPfad, zeileVon, zeileBis, opt);
-    const W = 794, H = 1123, L = pm[1] * 96, T = pm[3] * 96;
-    const s = Math.min(scale, (W - L - 4) / b.breite, (H - T - 4) / b.hoehe);
-    return `<div class="a4 xa4" style="width:${W}px;height:${H}px;padding:0;background:#fff;overflow:hidden"><div style="position:absolute;left:${L.toFixed(1)}px;top:${T.toFixed(1)}px;transform:scale(${s.toFixed(4)});transform-origin:0 0;color:#000">${b.html}</div></div>`;
-  }
-  root.formelnRechnen = formelnRechnen; root.seiteHtml = seiteHtml; root.zahlFormat = zahlFormat;
+  root.formelnRechnen = formelnRechnen; root.zahlFormat = zahlFormat;
+  // Schrift wie im PDF: alle Calibri-Schriften der Vorlage → Arial (Größe, fett, kursiv bleiben)
+  async function schriftArial(zip) { const f = zip.file('xl/styles.xml'); if (!f) return; let x = await f.async('string'); x = x.replace(/<font>([\s\S]*?)<\/font>/g, (m, i) => /<name val="Calibri"\/>/.test(i) ? '<font>' + i.replace('<name val="Calibri"/>', '<name val="Arial"/>').replace(/<scheme val="minor"\/>/, '') + '</font>' : m); zip.file('xl/styles.xml', x) }
+  root.schriftArial = schriftArial;
 
   root.excelFuellen = excelFuellen;
   if (typeof module !== 'undefined') module.exports = { excelFuellen, setze };

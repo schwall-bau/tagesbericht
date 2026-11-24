@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.17.1';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -284,7 +284,7 @@ ${tagVorVersand(r)}
 <h3>Unterschrift Polier</h3><div class="card"><canvas class="sigpad" id="sig"></canvas><div class="prow" style="margin-top:6px"><span class="hint" style="margin:0">Mit dem Finger unterschreiben</span><button class="btn small ghost" data-act="sigclear">Löschen</button></div></div>
 <h3>Vorschau</h3>${docViewer(r)}`;
 }
-function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box" id="xvorschau"><div class="hint" style="padding:30px;background:#fff;text-align:center">Vorschau wird erstellt …</div></div></div>${(vorschauLaden(r), '')}` }
+function docViewer(r) { if (r.typ === 'sl') return `<div class="a4wrap"><div class="a4box">${docSL(r)}</div></div>`; return `<div class="seg"><button class="${S.doc === 'tb' ? 'on' : ''}" data-doc="tb">Tagesbericht</button><button class="${S.doc === 'btb' ? 'on' : ''}" data-doc="btb">Bautagebuch</button></div><div class="a4wrap"><div class="a4box">${S.doc === 'tb' ? docTB(r) : docBTB(r)}</div></div>` }
 // Baustellen-Nr.: Zahlen-Tastatur zuerst; „ABC“ schaltet auf Buchstaben um (z. B. 26025A)
 const bnrFeld = (attr, v, ph) => `<div class="bnrfeld"><input ${attr} inputmode="${S.bnrABC ? 'text' : 'numeric'}" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" value="${esc(v)}" placeholder="${ph}"><button type="button" class="btn small ghost" data-kbd="1" title="Tastatur umschalten">${S.bnrABC ? '123' : 'ABC'}</button></div>`;
 document.addEventListener('pointerdown', e => { const b = e.target.closest('[data-kbd]'); if (!b) return; e.preventDefault(); const i = b.previousElementSibling; S.bnrABC = !S.bnrABC; i.inputMode = S.bnrABC ? 'text' : 'numeric'; b.textContent = S.bnrABC ? '123' : 'ABC'; i.blur(); setTimeout(() => i.focus(), 30) });
@@ -1286,54 +1286,89 @@ function sigFoot(r, bau) {
   return `<div class="foot"><div>Ausgestellt:<div class="sigline">${r.sig ? `<img src="${r.sig}">` : ''}</div><div style="font-size:9px">${esc(r.von)}</div></div>
  ${bau ? `<div>Anerkannt Bauleitung:<div class="sigline"></div></div>` : `<div style="padding-bottom:16px"><span class="box"></span>Lohn <span class="box"></span>Aufwand</div>`}</div>`;
 }
+// Tagesbericht / Bautagebuch als A4-Seite (HTML → Bild → PDF). Raster wie die Excel-Vorlage „Blanko“:
+// Spalten B–I (Kopf/Personal), 7 Arbeitspakete (je J:K, L:M …), Y (Lieferschein) und Z (Menge).
+// Breiten = Excel-Spaltenbreiten, auf die Seitenbreite hochgerechnet. Graue Felder, dicke/dünne/gestrichelte Linien wie in der Vorlage.
+const XB = [50, 50, 15, 28, 16, 13, 25, 22];          // B C D E F G H I
+const XAP = 44.5, XY = 94, XZ = 80;
+const colsLinks = () => XB.map(w => `<col style="width:${w}px">`).join('');
+// Zelle: o = { cs, rs, k: Klassen, t: dicke Linie oben, l: links, r: rechts, b: unten }
+const Z = (inhalt, o = {}) => `<td${o.cs > 1 ? ` colspan="${o.cs}"` : ''}${o.rs > 1 ? ` rowspan="${o.rs}"` : ''} class="${[o.k || '', o.t ? 'T' : '', o.l ? 'L' : '', o.r ? 'R' : '', o.b ? 'B' : ''].join(' ').trim()}"${o.st ? ` style="${o.st}"` : ''}>${inhalt ?? ''}</td>`;
+// linker Kopf (Spalten B–H), Zeilen 1–15; titel = „Tagesbericht“ / „Bautagebuch“
+function kopfB2H(r, titel, bau) {
+  const K = [];
+  K[1] = Z(titel, { cs: 7, rs: 2, k: 'g tt', t: 1, l: 1, r: 1, b: 1 });
+  K[3] = Z(`<img src="icons/logo-dark.png" alt="Schwall Bauunternehmung GmbH">`, { cs: 7, rs: 2, k: 'g lg ob', t: 1, l: 1, r: 1 });
+  K[5] = Z('Neue Welt 50 · 88471 Laupheim', { cs: 7, k: 'g sm ot ob', l: 1, r: 1 });
+  K[6] = Z('Telefon (073 92) 9703-0', { cs: 7, k: 'g sm ot', l: 1, r: 1, b: 1 });
+  K[7] = Z('Datum:', { cs: 3, k: 'g', t: 1, l: 1, r: 1 }) + Z('Tag:', { cs: 4, k: 'g', t: 1, r: 1 });
+  K[8] = Z(dShort(r.datum, '.'), { cs: 3, rs: 2, k: 'bi c', l: 1, r: 1, b: 1 }) + Z(wtag(r.datum), { cs: 4, rs: 2, k: 'bi c', r: 1, b: 1 });
+  K[10] = Z('Baustelle:', { cs: 7, k: 'g', t: 1, l: 1, r: 1 });
+  K[11] = Z(esc(r.baustelle), { cs: 7, k: 'bi', l: 1, r: 1 });
+  K[12] = Z(esc(r.bauteil), { cs: 7, k: 'bi', l: 1, r: 1, b: 1 });
+  return K;
+}
 function docTB(r) {
   const aps = r.aps.slice(0, 7); while (aps.length < 7) aps.push(null);
   const ML = matLines(r);
-  const M = row => { const l = ML[row - 3]; if (!l) return '<td></td><td></td>'; if (l.ls !== undefined) return `<td class="bi">${esc(l.ls)}</td><td class="bi r">${esc(l.mg)}</td>`; return `<td colspan="2" class="bi ${l.cls || ''}">${esc(l.t)}</td>` };
-  const K = kopfLinks(r, '/', 'Tagesbericht'); const rows = [];
-  rows[1] = K[0] + `<td rowspan="12" class="g vl">${rot('Arbeitsbeschreibung', 224, 17, 'sm')}</td>` + aps.map(a => `<td rowspan="12" class="apcol">${rot(a ? esc(a.text) : '', 224, 44, 'vt')}</td>`).join('') + `<td colspan="2" class="g">Baustoff/Lieferant</td>`;
-  rows[2] = `<td class="g">Lieferschein</td><td class="g r">Menge</td>`;
-  for (let i = 3; i <= 12; i++) rows[i] = (K[i - 1] || '') + M(i);
-  rows[13] = K[12] + `<td rowspan="3" class="g vl">${rot('AP', 56, 17, 'sm')}</td>` + aps.map(a => `<td rowspan="3" class="c bi" style="font-size:12px">${a ? esc(a.nr) : ''}</td>`).join('') + M(13);
-  rows[14] = K[13] + M(14); rows[15] = K[14] + M(15);
+  const M = row => { const l = ML[row - 3], o = { l: 1 }, o2 = { r: 1 }; if (!l) return Z('', Object.assign({ k: 'h' }, o)) + Z('', Object.assign({ k: 'h' }, o2)); if (l.ls !== undefined) return Z(esc(l.ls), Object.assign({ k: 'bi h' }, o)) + Z(esc(l.mg), Object.assign({ k: 'bi r0 h' }, o2)); return Z(esc(l.t), { cs: 2, k: 'bi h', l: 1, r: 1 }) };
+  const K = kopfB2H(r, 'Tagesbericht'), rows = [];
+  const apKopf = (a, i) => Z(rot(a ? esc(a.text) : '', 224, 44, 'vt'), { rs: 12, k: 'apcol', t: 1, b: 1, r: i === 6 });
+  rows[1] = K[1] + Z(rot('Arbeitsbeschreibung', 224, 22, 'sm'), { rs: 12, k: 'g vl', t: 1, l: 1, r: 1, b: 1 }) + aps.map(apKopf).join('') + Z('Baustoff/Lieferant', { cs: 2, k: 'g', t: 1, l: 1, r: 1 });
+  rows[2] = Z('Lieferschein', { k: 'g', l: 1 }) + Z('Menge', { k: 'g r0', r: 1 });
+  for (let i = 3; i <= 12; i++) rows[i] = (K[i] || '') + M(i);
+  rows[13] = Z('Baustellen-Nr.:', { cs: 3, k: 'g', t: 1, l: 1, r: 1 }) + Z('Wetter:', { cs: 4, k: 'g', t: 1, r: 1 }) + Z(rot('AP', 56, 22, 'sm'), { rs: 3, k: 'g vl', t: 1, l: 1, r: 1, b: 1 })
+    + aps.map((a, i) => Z(a ? esc(a.nr) : '', { cs: 1, rs: 3, k: 'c bi apnr', t: 1, b: 1, l: i === 0, r: i === 6 })).join('') + M(13);
+  rows[14] = Z(esc(r.baunr), { cs: 3, rs: 2, k: 'bi c', l: 1, r: 1, b: 1 }) + Z(r.temp !== '' && r.temp != null ? esc(r.temp) : '', { cs: 2, k: 'bi r0' }) + Z('°C', { cs: 2, k: 'bi', r: 1 }) + M(14);
+  rows[15] = Z(esc(r.wetter), { cs: 4, k: 'bi c', r: 1, b: 1 }) + M(15);
   const apSum = a => r.personal.reduce((x, p) => x + (p.zus ? 0 : num(p.h[a.id])), 0);
-  rows[16] = `<td colspan="4" class="g">Name</td><td class="g"></td><td class="g r">Std.</td><td></td>` + aps.map(a => `<td class="r">${a ? fq(apSum(a)) : ''}</td>`).join('') + M(16);
+  rows[16] = Z('Name', { cs: 6, k: 'g', t: 1, l: 1 }) + Z('Std.', { cs: 2, k: 'g r0', t: 1, l: 1, r: 1 }) + aps.map((a, i) => Z(a ? fq(apSum(a)) : '', { k: 'g c', t: 1, l: i === 0, r: i === 6 })).join('') + M(16);
   const P = r.personal.slice(); while (P.length < 14) P.push(null);
-  P.forEach((p, i) => { rows[17 + i] = `<td colspan="4" class="bi">${p ? esc(p.name) : ''}</td><td class="red c">${p && p.zus ? esc(p.zus) : ''}</td><td class="bi r">${p ? (p.zus ? '0,00' : fq(sumH(p))) : ''}</td><td></td>` + aps.map(a => `<td class="r">${p && a && !p.zus ? f2(p.h[a.id]) : ''}</td>`).join('') + M(17 + i) });
+  P.forEach((p, i) => { rows[17 + i] = Z(p ? esc(p.name) : '', { cs: 4, k: 'bi h', l: 1 }) + Z(p && p.zus ? esc(p.zus) : '', { cs: 2, k: 'red c h hl' }) + Z(p ? (p.zus ? '' : fq(sumH(p))) : '', { cs: 2, k: 'g bi r0 h', l: 1, r: 1 })
+    + aps.map((a, j) => Z(p && a && !p.zus ? f2(p.h[a.id]) : '', { k: 'c h', l: j === 0, r: j === 6 })).join('') + M(17 + i) });
   const o = 17 + P.length;
-  rows[o] = `<td class="g sm">Geräte</td><td colspan="4" class="g">Bezeichnung:</td><td class="g r">Std.</td><td></td>` + aps.map(() => '<td></td>').join('') + M(o);
+  rows[o] = Z('Geräte', { k: 'g sm', t: 1, l: 1 }) + Z('Bezeichnung:', { cs: 5, k: 'g', t: 1 }) + Z('Std.', { cs: 2, k: 'g r0', t: 1, l: 1, r: 1 }) + aps.map((a, i) => Z('', { k: 'g', t: 1, l: i === 0, r: i === 6 })).join('') + M(o);
   const G = r.geraete.slice(); while (G.length < 13) G.push(null);
-  G.forEach((g, i) => { rows[o + 1 + i] = `<td>${g ? esc(g.ks) : ''}</td><td colspan="4" class="bi" style="font-size:9.5px">${g ? esc(g.name) : ''}</td><td class="bi r">${g ? fq(sumH(g)) : ''}</td><td></td>` + aps.map(a => `<td class="r">${g && a ? f2(g.h[a.id]) : ''}</td>`).join('') + M(o + 1 + i) });
+  G.forEach((g, i) => { rows[o + 1 + i] = Z(g ? esc(g.ks) : '', { k: 'h sm', l: 1 }) + Z(g ? esc(g.name) : '', { cs: 5, k: 'bi h', st: 'font-size:9.5px' }) + Z(g ? fq(sumH(g)) : '', { cs: 2, k: 'g bi r0 h', l: 1, r: 1 })
+    + aps.map((a, j) => Z(g && a ? f2(g.h[a.id]) : '', { k: 'c h', l: j === 0, r: j === 6 })).join('') + M(o + 1 + i) });
   const e = o + 1 + G.length;
-  const Z = zeitRows(r, `<td colspan="10" class="g">Bemerkungen / Abweichende Arbeitszeit:</td>`, `<td colspan="10" rowspan="2" class="bi wrap">${esc(r.bem)}</td>`, '');
-  rows[e] = Z[0]; rows[e + 1] = Z[1]; rows[e + 2] = Z[2];
-  return `<div class="a4"><table><colgroup>${COLS_L}<col style="width:18px">${'<col style="width:45px">'.repeat(7)}<col style="width:94px"><col style="width:49px"></colgroup>
-  ${rows.filter(x => x !== undefined).map(x => `<tr>${x}</tr>`).join('')}</table>${sigFoot(r, false)}</div>`;
+  rows[e] = Z('Arbeitszeit', { cs: 8, k: 'g', t: 1, l: 1, r: 1 }) + Z('Bemerkungen / Abweichende Arbeitszeit:', { cs: 9, k: 'g', t: 1, r: 1 });
+  rows[e + 1] = zeitLabels() + Z(esc(r.bem), { cs: 9, rs: 2, k: 'bi wrap', r: 1, b: 1 });
+  rows[e + 2] = zeitWerte(r);
+  return `<div class="a4"><table><colgroup>${colsLinks()}${`<col style="width:${XAP}px">`.repeat(7)}<col style="width:${XY}px"><col style="width:${XZ}px"></colgroup>
+  ${rows.filter(x => x !== undefined).map(x => `<tr style="height:19px">${x}</tr>`).join('')}</table>${sigFoot(r, false)}</div>`;
 }
+const zeitLabels = () => Z('Beginn:', { k: 'g sm', l: 1 }) + Z('Ende:', { k: 'g sm' }) + Z('Pausen:', { cs: 3, k: 'g sm' }) + Z('Dauer:', { cs: 3, k: 'g sm', r: 1 });
+const zeitWerte = r => Z(r.beginn, { k: 'bi c', l: 1, b: 1 }) + Z(r.ende, { k: 'bi c', b: 1 }) + Z(r.pause, { cs: 3, k: 'bi c', b: 1 }) + Z(dauerTxt(r), { cs: 3, k: 'bi c', r: 1, b: 1 });
+// Bautagebuch-Text: eigener Text des Poliers oder die Arbeitspakete (ohne „AP“)
+const btbZeilen = r => { const z = []; if (r.btbArb && String(r.btbArb).trim()) return wrapLines(r.btbArb, 78); r.aps.forEach(a => { if (!a.text) return; if (z.length) z.push(''); z.push(...wrapLines(a.text, 78)) }); return z };
 function docBTB(r) {
-  const K = kopfLinks(r, '.', 'Bautagebuch');
-  const arb = []; r.aps.forEach((a, i) => { if (!a.text) return; if (arb.length) arb.push(''); arb.push(...wrapLines(a.text, 82)) });
-  const vork = wrapLines(r.vork, 82); const rows = [];
-  rows[1] = K[0] + `<td class="g">Bauherr:</td>`;
-  rows[2] = `<td rowspan="11" class="bh">${esc(r.bauherr)}</td>`;
-  for (let i = 3; i <= 12; i++) rows[i] = K[i - 1] || '';
-  rows[13] = K[12] + `<td class="g">(Grund)-Wasserstände:</td>`;
-  rows[14] = K[13] + `<td rowspan="2" class="bi">${esc(r.wasser)}</td>`; rows[15] = K[14];
-  rows[16] = `<td colspan="5" class="g">Name</td><td class="g r">Std.</td><td class="g">Art der geleisteten Arbeiten, einschl. Stundenlohnarbeiten, besondere</td>`;
+  const K = kopfB2H(r, 'Bautagebuch', true), arb = btbZeilen(r), vork = wrapLines(r.vork, 82), rows = [];
+  const R = (txt, o = {}) => Z(txt, Object.assign({ l: 1, r: 1 }, o));
+  rows[1] = K[1] + Z('', { rs: 12, k: 'g', t: 1, l: 1, r: 1, b: 1 }) + R('Bauherr:', { k: 'g', t: 1 });
+  rows[2] = R(esc(r.bauherr), { rs: 11, k: 'bh', b: 1 });
+  for (let i = 3; i <= 12; i++) rows[i] = K[i] || '';
+  rows[13] = Z('Baustellen-Nr.:', { cs: 3, k: 'g', t: 1, l: 1, r: 1 }) + Z('Wetter:', { cs: 5, k: 'g', t: 1, r: 1 }) + R('(Grund)-Wasserstände:', { k: 'g', t: 1 });
+  rows[14] = Z(esc(r.baunr), { cs: 3, rs: 2, k: 'bi c', l: 1, r: 1, b: 1 }) + Z(r.temp !== '' && r.temp != null ? esc(r.temp) : '', { cs: 3, k: 'bi r0' }) + Z('°C', { cs: 2, k: 'bi', r: 1 }) + R(esc(r.wasser), { k: 'bi' });
+  rows[15] = Z(esc(r.wetter), { cs: 5, k: 'bi c', r: 1, b: 1 }) + R('', { b: 1 });
+  rows[16] = Z('Name', { cs: 6, k: 'g', t: 1, l: 1 }) + Z('Std.', { cs: 2, k: 'g r0', t: 1, l: 1, r: 1 }) + R('Art der geleisteten Arbeiten, einschl. Stundenlohnarbeiten, besondere', { k: 'g', t: 1 });
   const P = r.personal.slice(); while (P.length < 14) P.push(null);
-  const right = []; right[17] = `<td class="g">Arbeitsschichten und Leistungen des Auftraggebers:</td>`;
-  const o = 17 + P.length, G = r.geraete.slice(); while (G.length < 13) G.push(null); const e = o + 1 + G.length;
-  const vRow = Math.min(e - 2, Math.max(o + 3, 18 + arb.length + 1));
-  for (let i = 18; i < vRow; i++) right[i] = `<td class="bi">${esc(arb[i - 18] || '')}</td>`;
-  right[vRow] = `<td class="g">Wichtige Vorkommnisse, Besprechungen:</td>`;
-  for (let i = vRow + 1; i < e; i++) right[i] = `<td class="bi">${esc(vork[i - vRow - 1] || '')}</td>`;
-  P.forEach((p, i) => { rows[17 + i] = `<td colspan="5" class="bi">${p ? esc(p.name) : ''}</td><td class="bi r ${p && p.zus ? 'red' : ''}">${p ? (p.zus ? esc(p.zus) : fq(sumH(p))) : ''}</td>` + (right[17 + i] || '') });
-  rows[o] = `<td class="g sm">Geräte</td><td colspan="4" class="g">Bezeichnung:</td><td class="g r">Std.</td>` + (right[o] || '');
-  G.forEach((g, i) => { rows[o + 1 + i] = `<td class="bi">${g ? esc(g.ks) : ''}</td><td colspan="4" class="bi" style="font-size:9.5px">${g ? esc(g.name + (g.firma ? ' (' + g.firma + ')' : '')) : ''}</td><td class="bi r">${g ? f2(sumH(g)) : ''}</td>` + (right[o + 1 + i] || '') });
-  const Z = zeitRows(r, '<td class="nob"></td>', '<td class="nob"></td>', '<td class="nob"></td>');
-  rows[e] = Z[0]; rows[e + 1] = Z[1]; rows[e + 2] = Z[2];
-  return `<div class="a4"><table><colgroup>${COLS_L}<col></colgroup>
-  ${rows.filter(x => x !== undefined).map(x => `<tr>${x}</tr>`).join('')}</table>${sigFoot(r, true)}</div>`;
+  const G = r.geraete.slice(); while (G.length < 13) G.push(null);
+  const o = 17 + P.length, e = o + 1 + G.length, rechts = [];
+  rechts[17] = R('Arbeitsschichten und Leistungen des Auftraggebers:', { k: 'g' });
+  // wie Excel: Arbeiten ab Zeile 69 (hier 19), 15 Zeilen; „Wichtige Vorkommnisse“ in Zeile 84 (hier 34), danach 10 Zeilen
+  const vRow = 34;
+  for (let i = 18; i < vRow; i++) rechts[i] = R(i >= 19 ? esc(arb[i - 19] || '') : '', { k: 'bi h ein', st: 'font-size:10px' });
+  rechts[vRow] = R('Wichtige Vorkommnisse, Besprechungen:', { k: 'g', t: 1 });
+  for (let i = vRow + 1; i < e; i++) rechts[i] = R(esc(vork[i - vRow - 1] || ''), { k: 'h' });
+  P.forEach((p, i) => { rows[17 + i] = Z(p ? esc(p.name) : '', { cs: 6, k: 'bi h', l: 1 }) + Z(p ? (p.zus ? esc(p.zus) : fq(sumH(p))) : '', { cs: 2, k: 'bi r0 h' + (p && p.zus ? ' red' : ''), l: 1, r: 1 }) + (rechts[17 + i] || R('', { k: 'h' })) });
+  rows[o] = Z('Geräte', { k: 'g sm', t: 1, l: 1 }) + Z('Bezeichnung:', { cs: 5, k: 'g', t: 1 }) + Z('Std.', { cs: 2, k: 'g r0', t: 1, l: 1, r: 1 }) + (rechts[o] || R('', { k: 'h' }));
+  G.forEach((g, i) => { rows[o + 1 + i] = Z(g ? esc(g.ks) : '', { k: 'h sm', l: 1 }) + Z(g ? esc(g.name + (g.firma ? ' (' + g.firma + ')' : '')) : '', { cs: 5, k: 'bi h', st: 'font-size:9.5px' }) + Z(g ? f2(sumH(g)) : '', { cs: 2, k: 'bi r0 h', l: 1, r: 1 }) + (rechts[o + 1 + i] || R('', { k: 'h' })) });
+  rows[e] = Z('Arbeitszeit', { cs: 8, k: 'g', t: 1, l: 1, r: 1 }) + R('', { t: 1 });
+  rows[e + 1] = zeitLabels() + R('');
+  rows[e + 2] = zeitWerte(r) + R('', { b: 1 });
+  return `<div class="a4"><table><colgroup>${colsLinks()}<col></colgroup>
+  ${rows.filter(x => x !== undefined).map(x => `<tr style="height:19px">${x}</tr>`).join('')}</table>${sigFoot(r, true)}</div>`;
 }
 function fitA4() { document.querySelectorAll('.a4box').forEach(b => { const a = b.querySelector('.a4'); if (!a) return; const s = b.clientWidth / 794; a.style.transform = `scale(${s})`; b.style.height = (a.offsetHeight * s) + 'px' }) }
 window.addEventListener('resize', fitA4);
@@ -1440,7 +1475,7 @@ async function seitenBild(html) {
 async function pdfErzeugen(r, art) {
   const { jsPDF } = window.jspdf; const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
   pdf.setProperties({ title: `${{ tb: 'Tagesbericht', btb: 'Bautagebuch', sl: 'Stundenlohnbericht' }[art]} ${r.baunr} ${dateDe(r.datum)}`, author: r.von, creator: 'Schwall Tagesbericht-App ' + APP_VERSION });
-  pdf.addImage(await seitenBild(art === 'sl' ? docSL(r) : (await excelSeiten(r))[art]), 'JPEG', 0, 0, 210, 297);
+  pdf.addImage(await seitenBild(art === 'sl' ? docSL(r) : art === 'tb' ? docTB(r) : docBTB(r)), 'JPEG', 0, 0, 210, 297);
   if (art === 'tb' || art === 'sl') {   // Anlage: Lieferschein-Fotos, 2 pro Seite
     const fotos = r.material.flatMap(m => m.fotos.map(f => [m, f]));
     for (let i = 0; i < fotos.length; i++) {
@@ -1452,16 +1487,6 @@ async function pdfErzeugen(r, art) {
   }
   return pdf.output('blob');
 }
-// Tagesbericht/Bautagebuch-Seiten direkt aus der ausgefüllten Excel-Vorlage zeichnen → PDF sieht aus wie die Excel
-const calibriDa = (() => { let e = null; return () => { if (e === null) { try { const c = document.createElement('canvas').getContext('2d'), t = 'mmmmmmmmmmlli1WW'; c.font = '20px monospace'; const a = c.measureText(t).width; c.font = '20px Calibri, monospace'; e = c.measureText(t).width !== a } catch (x) { e = false } } return e } })();
-let XS = { key: null, p: null };
-function excelSeiten(r) {
-  const key = JSON.stringify(r, (k, v) => k === 'fotos' || k === 'ocr' ? undefined : v);
-  if (XS.key !== key) { XS = { key, p: (async () => { const zip = await JSZip.loadAsync(await (await excelErzeugen(r)).arrayBuffer()), opt = { calibri: calibriDa() }; return { tb: await seiteHtml(zip, 'xl/worksheets/sheet1.xml', 1, 50, opt), btb: await seiteHtml(zip, 'xl/worksheets/sheet1.xml', 51, 100, opt) } })() }; XS.p.catch(() => { XS = { key: null, p: null } }) }
-  return XS.p;
-}
-let vorschauNr = 0;
-function vorschauLaden(r) { const nr = ++vorschauNr; setTimeout(async () => { if (nr !== vorschauNr) return; const box = $('#xvorschau'); if (!box) return; try { const s = await excelSeiten(r); if (nr !== vorschauNr || !$('#xvorschau')) return; $('#xvorschau').innerHTML = s[S.doc === 'btb' ? 'btb' : 'tb']; fitA4() } catch (e) { console.error(e); const b = $('#xvorschau'); if (b) b.innerHTML = '<div class="hint" style="padding:20px">Vorschau nicht möglich: ' + esc(e.message) + '</div>' } }, 350) }
 let VORLAGE = null;
 async function excelErzeugen(r) {   // füllt die Original-Excel-Vorlage (Tagesbericht + Bautagebuch + Blatt „Lohn“)
   if (!VORLAGE) VORLAGE = await (await fetch('vorlage-tagesbericht.xlsx')).arrayBuffer();

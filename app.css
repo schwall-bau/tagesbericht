@@ -105,9 +105,9 @@ mark{background:#ffe2b3;color:inherit;border-radius:3px}
 .a4 .bi{font-weight:700;font-style:italic}
 .a4 .c{text-align:center}.a4 .r{text-align:right}
 .a4 .sm{font-size:8.5px}
-.a4 .tt{font-size:21px;font-weight:700;text-align:center;height:36px;border-bottom:2px solid #ED7102}
+.a4 .tt{font-size:22px;font-weight:700;text-align:center;height:36px}
 .a4 .lg{text-align:left;padding:3px 4px}
-.a4 .lg img{height:44px;display:block}
+.a4 .lg img{height:33px;display:block}
 .a4 .red{color:#d00000;font-weight:700}
 .a4 .vl{position:relative;padding:0}
 .a4 .rot{position:absolute;left:0;top:100%;transform-origin:0 0;transform:rotate(-90deg);display:flex;align-items:center;white-space:normal;overflow:hidden;padding:0 4px;box-sizing:border-box}
@@ -237,5 +237,12 @@ header #hbtn{background:#fff;border-color:#1e1e1c;color:#1e1e1c}
 
 /* Baustellen-Nr. mit Tastatur-Umschalter */
 .bnrfeld{display:flex;gap:6px;align-items:stretch}.bnrfeld input{flex:1;min-width:0}.bnrfeld .btn{flex:none;min-width:58px}
-.a4.xa4 td{height:auto;padding:0 2px;line-height:normal;text-overflow:clip;box-sizing:border-box}
 .sbt{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}.sbt th,.sbt td{border-bottom:1px solid var(--line);padding:5px 3px;text-align:right;white-space:nowrap}.sbt th:first-child,.sbt td:first-child{text-align:left;white-space:normal;min-width:96px}.sbt th{font-size:12px;color:var(--mut)}.sbt .sum1{font-weight:700}.sbt .sumz td{font-weight:700;border-top:2px solid var(--line)}.sbt .lnk{border:0;background:none;color:var(--orange);font-weight:700;font-size:12px;padding:0}
+/* Linien wie in der Excel-Vorlage: dünne graue Zeilenlinien (hair), dicke Rahmen (medium) */
+.a4 .r0{text-align:right}
+.a4 td.h{border-top:1px solid #a6a6a6;border-bottom:1px solid #a6a6a6}
+.a4 td.hl{border-left:1px solid #a6a6a6}
+.a4 td.ein{padding-left:24px}
+.a4 td.apnr{font-size:12px}
+.a4 td.T{border-top:2px solid #000}.a4 td.B{border-bottom:2px solid #000}.a4 td.L{border-left:2px solid #000}.a4 td.R{border-right:2px solid #000}
+.a4 td.ot{border-top:0}.a4 td.ob{border-bottom:0}
