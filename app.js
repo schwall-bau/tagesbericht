@@ -3,7 +3,7 @@
    Läuft komplett im Browser des Handys, auch offline.
    Erzeugt Tagesbericht- und Bautagebuch-PDF + Daten (JSON) + Lohn-CSV
    und versendet sie per E-Mail (Teilen-Menü) oder optional direkt an Power Automate. */
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.19.0';
 const FIRMA = { name: 'Schwall', zusatz: 'Bauunternehmung GmbH', adr: 'Neue Welt 50 · 88471 Laupheim', tel: 'Tel. (073 92) 9703-0' };
 
 // ---------------------------------------------------------------- Speicher (IndexedDB)
@@ -194,6 +194,7 @@ function vSettings() {
   <div class="card"><b>Stammdaten</b><div class="hint">${SD ? `${SD.ma.length} Mitarbeiter, ${SD.ge.length} Geräte, ${SD.mat.length} Materialien · Stand ${dateDe(SD.stand)}<br>Quelle: ${esc(SD.quelle || '')}` : 'nicht geladen'}</div>
   <span class="btn ghost full fotobtn">📂 Neue Excel/JSON laden<input type="file" id="s_file" accept=".xlsx,.xlsm,.json"></span><div id="s_info" class="hint"></div></div>
   <div class="card"><b>Gelernte Lieferscheine</b><div class="hint">${Object.keys(LERN.lief).length} Lieferanten, ${Object.keys(LERN.alias).length} Briefköpfe zugeordnet. Die App lernt aus jedem gesendeten Bericht: welcher Briefkopf zu welchem Lieferanten gehört und welches Material dort meist geliefert wird.</div><button class="btn small ghost" data-act="lernreset">Gelerntes zurücksetzen</button></div>
+  <div class="card"><b>Kamera (Android)</b><p class="hint">Standard: Kamera in der App – immer Rückkamera, volle Auflösung, mit Licht-Knopf.</p><label class="check" style="margin:0;color:var(--txt);font-weight:400"><input type="checkbox" id="s_syskam" ${SET.systemKamera ? 'checked' : ''} style="width:22px;height:22px;flex:none"><span>Stattdessen die Kamera-App des Handys verwenden</span></label></div>
   <div class="card"><b>Senden testen (Android)</b><p class="hint">Falls beim Senden „Permission denied“ kommt: jeden Knopf einmal antippen und das Teilen-Fenster wieder schließen. Das Ergebnis bitte ans Büro schicken.</p>
   <div class="grid3"><button class="btn small ghost" data-tst="text">Nur Text</button><button class="btn small ghost" data-tst="pdf">1 PDF</button><button class="btn small ghost" data-tst="txt">1 TXT</button></div><div id="tstout" class="hint" style="white-space:pre-wrap"></div></div>
   <div class="card"><b>Daten auf diesem Handy</b><p class="hint">Entwurf, Verlauf und Stammdaten liegen nur auf diesem Gerät.</p><button class="btn danger full" data-act="reset">Alles auf diesem Handy löschen</button></div>`;
@@ -354,10 +355,12 @@ function ocrCanvas(bmp, rot, mode, max) {
 }
 // Schnell lesen: erster Durchgang dient gleichzeitig als Lage-Prüfung. Weitere Durchgänge nur, solange Felder fehlen,
 // und höchstens ca. 25 Sekunden. Gedrehte Fotos: nur dann alle vier Lagen prüfen, wenn der erste Durchgang kaum Wörter liefert.
+let OCR_PX = 2000;   // längste Bildseite im 1. Durchgang
 async function ocrLesen(file, status) {
   const t0 = Date.now(), w = await ocrInit(), bmp = await createImageBitmap(file);
   const woerter = t => (t.match(/(^|\s)[A-ZÄÖÜa-zäöüß][a-zäöüß]{3,}[.,:]?(?=\s|$)/g) || []).length;
-  const fertig = r => r.ls && r.menge != null && r.menge !== '' && (r.mat || r.miete);
+  // fertig, wenn alles da ist – oder wenn weitere Durchgänge nichts bringen (Handschrift-Rapport, Händler ohne Menge)
+  const fertig = r => (r.ls && r.menge != null && r.menge !== '' && (r.mat || r.miete)) || (r.profil && r.miete) || (r.divers && r.ls);
   const lesen = async (rot, mode, psm, mx, nr, von) => {
     ocrProg = p => status(`Text wird gelesen (${nr}/${von}) … ${Math.round(p * 100)} %`);
     await w.setParameters({ tessedit_pageseg_mode: psm });
@@ -365,7 +368,7 @@ async function ocrLesen(file, status) {
   };
   status('Text wird gelesen …');
   // 1. Durchgang: adaptive Schwelle (am besten für Lieferscheine), aufrecht
-  const d0 = await lesen(0, 'a', '6', 2000, 1, 3); let rot = 0, text = d0.text || '';
+  const d0 = await lesen(0, 'a', '6', OCR_PX, 1, 3); let rot = 0, text = d0.text || '';
   if (woerter(text) < 8 || d0.confidence < 45) {
     // kaum lesbar → Lage prüfen (kleine, schnelle Probe-Bilder)
     status('Foto liegt evtl. gedreht – Lage wird geprüft …');
@@ -374,11 +377,11 @@ async function ocrLesen(file, status) {
     const p = {}; for (const r of [0, 90, 180, 270]) p[r] = await probe(r);
     const sc = r => p[r].q * p[r].cf + p[(r + 90) % 360].q * p[(r + 90) % 360].cf;
     rot = [0, 90, 180, 270].reduce((a, b) => sc(b) > sc(a) ? b : a, 0);
-    if (rot) text = (await lesen(rot, 'a', '6', 2000, 1, 3)).text || '';
+    if (rot) text = (await lesen(rot, 'a', '6', OCR_PX, 1, 3)).text || '';
   }
   let res = parseLieferschein(text);
   const weitere = [['c', '6', 2000], ['g', '11', 2400]];
-  for (let i = 0; i < weitere.length && !fertig(res) && Date.now() - t0 < 25000; i++) {
+  for (let i = 0; i < weitere.length && !fertig(res) && Date.now() - t0 < 14000; i++) {
     const [mode, psm, mx] = weitere[i];
     text += '\n' + ((await lesen(rot, mode, psm, mx, i + 2, 3)).text || '');
     res = parseLieferschein(text);
@@ -489,7 +492,7 @@ const LS_PROFILE = [
     lese(t) { return { menge: regieStunden(t), mat: angekreuzt(t) || regieMaterial(t, 'LKW 4-Achser') } } },
   { id: 'Liegl', name: 'Liegl GmbH (Rapport)', lief: 'Liegl', re: /\bliegl\b|liegl-laupheim/i, miete: true, chips: mietChips,
     lese(t) { const o = {}; let m; if ((m = t.match(/lieferschein[^\d]{0,20}((?:\d\s?){5,6})/i))) o.ls = m[1].replace(/\s/g, ''); o.menge = regieStunden(t); o.mat = regieMaterial(t, 'LKW 4-Achser'); return o } },
-  { id: 'BSR', name: 'Baustoffrecycling Laupheim (BSR)', lief: 'BSR', re: /baustoff\s*-?\s*recycling|stoffrecycling\s*laupheim|kies-\s*und\s*sandvertrieb|und\s*sandvertrieb|motorw\.?\s*mat/i, einh: 'to', nurMat: true,
+  { id: 'BSR', name: 'Baustoffrecycling Laupheim (BSR)', lief: 'BSR', schwach: true, re: /baustoff\s*-?\s*recycling|stoffrecycling\s*laupheim|kies-\s*und\s*sandvertrieb|und\s*sandvertrieb|motorw\.?\s*mat/i, einh: 'to', nurMat: true,
     chips: () => ['60', '65', '82', '75', '46', '17', '16'].map(k => [k + ' ' + BSR_CODES[k], BSR_CODES[k], 'to']),
     lese(t) { const o = {}; let m;
       if ((m = t.match(/wiegeschein\D{0,25}(\d{5,7})/i) || t.match(/\b(2\d{5})\b/))) o.ls = m[1];
@@ -514,13 +517,13 @@ const LS_PROFILE = [
     lese(t) { const o = {}; let m;
       const nr = [...t.matchAll(/\bnr\.?\s*:?\s*(\d{5,6})\b/gi)].map(x => x[1]); if (nr.length) o.ls = nr.sort((a, b) => nr.filter(x => x === b).length - nr.filter(x => x === a).length)[0];
       o.mat = angekreuzt(t) || ''; o.menge = regieStunden(t); return o } },
-  { id: 'a+b', name: 'a+b Asphalt- und Betonmischwerke', lief: 'a+b', re: /a\s*\+\s*b\s*asphalt|asphalt-?\s*und\s*betonmischwerke|splittwerk\s*ingoldingen|ausgangslieferschein/i, einh: 'to',
+  { id: 'a+b', name: 'a+b Asphalt- und Betonmischwerke', lief: 'a+b', re: /a\s*\+\s*b\s*asphalt|asphalt-?\s*und\s*betonmischwerke|splittwerk\s*ingoldingen|ausgangslieferschein|07355\s*9303|asphalt-und-beton\.de|winterstetter/i, einh: 'to',
     lese(t) { const o = {}; let m;
       if ((m = t.match(/ausgangs\s*-?\s*lieferschein\s*nr\.?\s*:?\s*(\d{5,7})/i))) o.ls = m[1];
       if ((m = t.match(/\bN\s*[:.]?\s*(\d{1,3}[.,]\d{2})\s*t/))) o.menge = zahlDe(m[1]);
       const s = asphaltSorte(t); if (s) Object.assign(o, s); else if ((m = t.match(/material\s*\w{0,6}\s*\n\s*([^\n]{4,45})/i))) o.mat = m[1].trim();
       return o } },
-  { id: 'MKB', name: 'Moränekieswerk Baustetten (MKB)', lief: 'MKB', re: /mor[aä]nekies(?!sand)|splittwerke|kies\s*und\s*splitt/i, einh: 'to', nurProfil: true,
+  { id: 'MKB', name: 'Moränekieswerk Baustetten (MKB)', lief: 'MKB', schwach: true, re: /mor[aä]nekies(?!sand)|splittwerke|kies\s*und\s*splitt/i, einh: 'to', nurProfil: true,
     chips: () => [['Aushub', 'Aushub (Anlieferung)', 'm3'], ...SD.mat.filter(m => m[3] === 'MKB' && !/aushub/i.test(m[0])).slice(0, 7).map(m => [m[0], m[0], m[2]])],
     lese(t) { const o = {}; let m;
       if ((m = t.match(/bon\s*-?\s*nr\.?\s*:?\s*(\d{3,})/i))) o.ls = m[1];
@@ -614,10 +617,19 @@ function lernen(r) {
 }
 const lernMat = lief => { const L = LERN.lief[lief]; if (!L) return []; return Object.entries(L.mat).sort((a, b) => b[1] - a[1]).map(x => x[0]) };
 
+// schwach = Regel erkennt auch allgemeine Wörter (z. B. „Baustoffrecycling“ steht auch bei Biechele im Kopf) → ein Firmenname gewinnt
+// Welche Lieferanten-Regel passt? Der Lieferant steht im Briefkopf oben – andere Firmennamen weiter unten (Spediteur, Fahrzeug,
+// z. B. ein Liegl-LKW auf einem a+b-Lieferschein) zählen weniger. Rapport-/Stunden-Regeln gelten nie für Wiegescheine mit Tonnen.
+const GEWICHT_SIGNAL = /\bnetto\b|\bbrutto\b|\btara\b|waage|wiege|ausgangs\s*-?\s*lieferschein|\bN\s*[:.]?\s*\d{1,3}[.,]\d{2}\s*t\b|\b\d{1,2}[.,]\d{2}\s*t\b.*\b\d{1,2}[.,]\d{2}\s*t\b/i;
+function profilWaehlen(t) {
+  const gewicht = GEWICHT_SIGNAL.test(t); let best = null, bestS = Infinity;
+  for (const p of LS_PROFILE) { if (p.miete && gewicht) continue; const m = t.match(p.re); if (!m) continue; const sc = m.index + (p.schwach ? 600 : 0); if (sc < bestS) { best = p; bestS = sc } }
+  return best;
+}
 function parseLieferschein(text) {
   const t = text.replace(/[|]/g, ' ').replace(/[ \t]+/g, ' '), low = t.toLowerCase(), flat = low.replace(/\s+/g, ''), flatA = low.replace(/[^a-z0-9äöüß]/g, '');
   const out = { felder: [] };
-  const P = LS_PROFILE.find(p => p.re.test(t));
+  const P = profilWaehlen(t);
   out.kopf = briefkopf(t);
   // Lieferant: 1. feste Regel, 2. Gelerntes, 3. Stammdaten-Name im Text, 4. Briefkopf (neuer Lieferant)
   if (P && P.lief) out.lief = P.lief;
@@ -659,6 +671,12 @@ function parseLieferschein(text) {
   // Gelerntes je Lieferant: Einheit / Miete
   const L = out.lief && LERN.lief[out.lief];
   if (L) { if (!out.einh && L.einh) out.einh = L.einh; if (!P && L.miete > L.n / 2) { out.miete = true; out.einh = 'Std' } }
+  // Wiegeschein ohne erkannten Lieferanten: Netto „N 16,62 t“ lesen; ein Fuhrunternehmen (nur Fahrzeug/Spediteur) ist nicht der Lieferant
+  if (!P && GEWICHT_SIGNAL.test(t)) {
+    let m2; if ((out.menge == null || out.menge === '') && (m2 = t.match(/\bN\s*[:.]?\s*(\d{1,3}[.,]\d{2})\s*t/))) { out.menge = zahlDe(m2[1]); out.einh = 'to' }
+    if (out.lief && LS_PROFILE.some(q => q.miete && q.lief === out.lief)) { delete out.lief; out.liefNeu = false }
+    if (out.miete) { out.miete = false; out.einh = 'to' }
+  }
   if (P && P.divers) { out.mat = 'Sonstiges (divers)'; out.matnr = ''; out.einh = ''; delete out.menge; out.divers = true }
   const kz = kfzAus(t); if (kz) out.kfz = kz;
   const dm = [...t.matchAll(/\b(\d{1,2})\.(\d{1,2})\.(\d{2}|20\d{2})\b/g)].find(x => +x[1] >= 1 && +x[1] <= 31 && +x[2] >= 1 && +x[2] <= 12); if (dm) out.datum = `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
@@ -674,6 +692,58 @@ function kfzAus(t) {
   }
   return '';
 }
+// ---------------------------------------------------------------- Kamera in der App (Android)
+// Android öffnet mit capture="environment" oft die Kamera-App mit der zuletzt benutzten Linse (z. B. Selfie).
+// Deshalb auf Android eigene Kamera: immer Rückkamera, volle Auflösung (ImageCapture), Dauerfokus, Licht-Knopf.
+const istAndroid = () => /Android/i.test(navigator.userAgent);
+let KAM_AUS = false;   // true = einmalig die System-Kamera verwenden
+async function kameraOeffnen() {
+  const versuche = [
+    { video: { facingMode: { exact: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 } }, audio: false },
+    { video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }];
+  for (const c of versuche) { try { return await navigator.mediaDevices.getUserMedia(c) } catch (e) { } }
+  return null;
+}
+function inAppKamera() {
+  return new Promise(async fertig => {
+    const stream = await kameraOeffnen(); if (!stream) { fertig(undefined); return }
+    const track = stream.getVideoTracks()[0], cap = track.getCapabilities ? track.getCapabilities() : {};
+    try { if (cap.focusMode && cap.focusMode.includes('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }) } catch (e) { }
+    const o = document.createElement('div'); o.className = 'kamera';
+    o.innerHTML = `<video playsinline autoplay muted></video><div class="kamrahmen"></div>
+      <div class="kamhint">Lieferschein ganz ins Bild, flach und gut beleuchtet</div>
+      <div class="kambar"><button class="btn ghost" data-k="x">✕</button>${cap.torch ? '<button class="btn ghost" data-k="licht">💡</button>' : ''}<button class="kamausl" data-k="foto" aria-label="Aufnehmen"></button><button class="btn ghost small" data-k="sys">System-<br>Kamera</button></div>`;
+    document.body.appendChild(o);
+    const v = o.querySelector('video'); v.srcObject = stream;
+    let licht = false, fertigGesetzt = false;
+    const ende = f => { if (fertigGesetzt) return; fertigGesetzt = true; stream.getTracks().forEach(t => t.stop()); o.remove(); fertig(f) };
+    o.onclick = async e => {
+      const k = e.target.closest('[data-k]'); if (!k) return; const a = k.dataset.k;
+      if (a === 'x') ende(null);
+      if (a === 'sys') ende(undefined);
+      if (a === 'licht') { licht = !licht; try { await track.applyConstraints({ advanced: [{ torch: licht }] }) } catch (x) { } }
+      if (a === 'foto') {
+        k.disabled = true; o.classList.add('blitz');
+        let blob = null;
+        try { if (window.ImageCapture) blob = await new ImageCapture(track).takePhoto(licht ? { fillLightMode: 'flash' } : {}) } catch (x) { blob = null }
+        if (!blob) { const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext('2d').drawImage(v, 0, 0); blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92)); c.width = c.height = 0 }
+        ende(blob ? new File([blob], 'lieferschein-' + Date.now() + '.jpg', { type: blob.type || 'image/jpeg' }) : null);
+      }
+    };
+  });
+}
+document.addEventListener('change', async e => { if (e.target.id !== 's_syskam') return; SET.systemKamera = e.target.checked; await DB.set('settings', SET); toast(SET.systemKamera ? 'Kamera-App des Handys wird verwendet' : 'Kamera in der App wird verwendet') });
+// Tippen auf „Kamera“ (Eingabefeld mit capture) → auf Android eigene Kamera; Ergebnis wie ein normal gewähltes Foto weitergeben
+document.addEventListener('click', async e => {
+  const inp = e.target.closest('input[type=file][capture]');
+  if (!inp || !istAndroid() || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || SET.systemKamera) return;
+  if (KAM_AUS) { KAM_AUS = false; return }
+  e.preventDefault();
+  const f = await inAppKamera();
+  if (f === undefined) { KAM_AUS = true; inp.click(); return }   // keine Kamera-Freigabe oder „System-Kamera“ gewählt
+  if (!f) return;
+  try { const dt = new DataTransfer(); dt.items.add(f); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true })) } catch (x) { toast('Foto konnte nicht übernommen werden') }
+}, true);
 // Ein oder mehrere Fotos scannen → je Foto ein Lieferschein-Eintrag (bei mehreren Positionen mehrere Einträge)
 async function scanLieferscheine(files, zielId, ziel) {
   const r = ziel || S.r; let erkannt = 0;
